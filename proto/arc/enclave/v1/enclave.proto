@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package arc.enclave.v1;
+
+option go_package = "github.com/circlefin/arc-remote-signer/proto/pb";
+
+import "buf/validate/validate.proto";
+
+service EnclaveService {
+  rpc GenerateKey(GenerateKeyRequest) returns (GenerateKeyResponse) {}
+  rpc GetPublicKey(GetPublicKeyRequest) returns (GetPublicKeyResponse) {}
+  rpc SignMessage(SignMessageRequest) returns (SignMessageResponse) {}
+  rpc GetAttestation(GetAttestationRequest) returns (GetAttestationResponse) {}
+}
+
+enum Algorithm {
+  ALGORITHM_UNSPECIFIED = 0;
+  ALGORITHM_BLS = 1;
+  ALGORITHM_ED25519 = 2;
+}
+
+message GenerateKeyRequest {
+  Algorithm algorithm = 1 [(buf.validate.field).enum = {
+    defined_only: true,
+    not_in: [0]
+  }];
+  bytes enclave_encrypted_data_key = 2 [(buf.validate.field).bytes.min_len = 1];
+}
+
+message GenerateKeyResponse {
+  bytes public_key = 1 [(buf.validate.field).bytes.min_len = 1];
+  bytes encrypted_private_key = 2 [(buf.validate.field).bytes.min_len = 1];
+  bytes nonce = 3 [(buf.validate.field).bytes.min_len = 1];
+}
+
+message EncryptedKeyMaterial {
+  bytes encrypted_private_key = 1 [(buf.validate.field).bytes.min_len = 1];
+  bytes enclave_encrypted_data_key = 2 [(buf.validate.field).bytes.min_len = 1];
+  bytes nonce = 3 [(buf.validate.field).bytes.min_len = 1];
+}
+
+message GetPublicKeyRequest {
+  Algorithm algorithm = 1 [(buf.validate.field).enum = {
+    defined_only: true,
+    not_in: [0]
+  }];
+  EncryptedKeyMaterial encrypted_key_material = 2 [(buf.validate.field).required = true];
+}
+
+message GetPublicKeyResponse {
+  bytes public_key = 1 [(buf.validate.field).bytes.min_len = 1];
+}
+
+message SignMessageRequest {
+  Algorithm algorithm = 1 [(buf.validate.field).enum = {
+    defined_only: true,
+    not_in: [0]
+  }];
+  EncryptedKeyMaterial encrypted_key_material = 2 [(buf.validate.field).required = true];
+  bytes message = 3 [(buf.validate.field).bytes.min_len = 1];
+}
+
+message SignMessageResponse {
+  bytes signature = 1 [(buf.validate.field).bytes.min_len = 1];
+}
+
+message GetAttestationRequest {}
+
+message GetAttestationResponse {
+  bytes attestation_document = 1 [(buf.validate.field).bytes.min_len = 1];
+}

@@ -1,0 +1,34 @@
+version: "2"
+linters:
+  enable:
+    - godot       # Check if comments end in a period
+    - govet       # Vet examines Go source code and reports suspicious constructs, such as Printf calls whose arguments do not align with the format string
+    - revive      # Fast, configurable, extensible, flexible, and beautiful linter for Go. Drop-in replacement of golint.
+    - whitespace  # Tool for detection of leading and trailing whitespace
+formatters:
+  enable:
+    - gci         # Gci controls golang package import order and makes it always deterministic.
+    - gofmt       # Gofmt checks whether code was gofmt-ed. By default this tool runs with -s option to check for code simplification
+issues:
+  include:
+    # Documentation linting
+    - EXC0012
+    - EXC0013
+    - EXC0014
+    - EXC0015
+  exclude:
+    - 'github.com\/stretchr\/testify\/suite\.Suite contains sync\.RWMutex'
+
+linters-settings:
+  gci:
+    sections:
+      - standard # Standard section: captures all standard packages.
+      - default # Default section: contains all imports that could not be matched to another section type.
+      - prefix(github.com/circlefin) # Custom section: groups all imports with the specified Prefix.
+
+run:
+  timeout: 10m
+  build-tags:
+    - smoke
+    - integration
+    - smoketf

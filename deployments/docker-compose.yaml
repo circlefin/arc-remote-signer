@@ -1,0 +1,54 @@
+x-health-retry:
+  &health-retry
+  interval: 10s
+  timeout: 10s
+  retries: 30
+
+services:
+  enclave:
+    image: "nitro-enclave-signer-internal:local"
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      AWS_PROFILE: ${AWS_PROFILE:-}
+      AWS_ACCESS_KEY_ID: foo
+      AWS_SECRET_ACCESS_KEY: bar
+      APP_PROVIDER_AWSKMS_LOCALSTACK_ENABLED: true
+      APP_PROVIDER_AWSKMS_LOCALSTACK_ENDPOINT: http://localstack:4566
+      APP_PROVIDER_AWSKMS_LOCALSTACK_REGION: us-east-1
+      APP_PROVIDER_AWSKMS_ARNS: arn:aws:kms:us-east-1:000000000000:alias/dev-multi-region-crypto,arn:aws:kms:us-west-2:000000000000:alias/dev-multi-region-crypto
+      APP_NITROENCLAVE_ENABLED: false
+    ulimits:
+      memlock: -1
+    ports:
+      - "10350:10350"
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=127.0.0.1:10350", "-service=arc.enclave.v1.EnclaveService"]
+      <<: *health-retry
+    entrypoint: ["/usr/local/circle/run_enclave.dev.sh"]
+    depends_on:
+      localstack:
+        condition: service_healthy
+
+  ######################
+  ##### Localstack #####
+  ######################
+  localstack:
+    container_name: localstack
+    image: localstack/localstack:3
+    ports:
+      - "127.0.0.1:4566:4566"            # LocalStack Gateway
+      - "127.0.0.1:4510-4559:4510-4559"  # external services port range
+    environment:
+      DEBUG: ${DEBUG-}
+      DOCKER_HOST: unix:///var/run/docker.sock
+      LOCALSTACK_HOST: localstack
+      LOCALSTACK_PORT: 4566
+    volumes:
+      - "${LOCALSTACK_VOLUME_DIR:-./volume}:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./localstack_scripts/create-kms-keys.sh:/etc/localstack/init/ready.d/create-kms-keys.sh" # runs script when localstack is ready
+      - "./localstack_scripts/create-secret-manager-key.sh:/etc/localstack/init/ready.d/create-secret-manager-key.sh" # runs script when localstack is ready
+      - './localstack_scripts/health-check.sh:/opt/health-check.sh' # health check script
+    healthcheck:
+      test: ['CMD', 'bash', '/opt/health-check.sh']
+      <<: *health-retry

@@ -1,0 +1,25 @@
+// This file is derived from:
+// https://github.com/ava-labs/avalanchego/blob/master/proto/signer/signer.proto
+
+syntax = "proto3";
+
+package arc.signer.v1;
+
+option go_package = "github.com/circlefin/arc-remote-signer/proto/pb";
+
+service SignerService {
+  rpc PublicKey(PublicKeyRequest) returns (PublicKeyResponse) {}
+  rpc Sign(SignRequest) returns (SignResponse) {}
+}
+
+message PublicKeyRequest {}
+message PublicKeyResponse {
+  bytes public_key = 1;
+}
+
+message SignRequest {
+  bytes message = 1;
+}
+message SignResponse {
+  bytes signature = 1;
+}
