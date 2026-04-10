@@ -1,0 +1,29 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1
+    hooks:
+      - id: go-fmt
+      - id: no-go-testing
+      - id: golangci-lint
+        args: [--config=./build/golangci.yaml, --fix]
+      - id: go-mod-tidy
+      - id: go-unit-tests
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.77.1
+    hooks:
+      - id: terraform_fmt
+  - repo: local
+    hooks:
+      - id: check-copyright-golang
+        name: Check copyright header - golang
+        entry: ./scripts/check-copyright-header.sh
+        language: script
+        files: \.go$
+        exclude: _mock\.go$

@@ -1,0 +1,41 @@
+public:
+  server:
+    host: 0.0.0.0
+    port: 10340
+service:
+  signer:
+    keyId: "00000000-0000-0000-0000-000000000000"
+    algorithm: "ed25519"
+provider: # config for external services
+  secrets:
+    localstack:
+      enabled: false
+      endpoint: http://localhost:4566
+      region: us-east-1
+  enclave:
+    nitroEnclave:
+      enabled: false  # Set to true in production with Nitro Enclave (uses VSOCK)
+      cid: 16         # Enclave CID (typically 16 for first enclave)
+      port: 10350     # Port the enclave server listens on
+    client:
+      name: "enclave"
+      baseURL: localhost:10350  # Used when nitroEnclave.enabled=false (TCP gRPC target)
+      retry:
+        maxAttempts: 1
+      requestTimeoutMS: 500
+  awskms:
+    localstack:
+      enabled: false
+      endpoint: http://localhost:4566
+      region: us-east-1
+    arns:
+    connectTimeout: 500
+profiler:
+  # These are the dev values.  Even if we didn't want to specify dev values, we would still have to specify
+  # the structure here so Viper knows to look for them in environment variables
+  enabled: true
+metrics:
+  statsd:
+    host: 127.0.0.1
+    port: 8125
+    telemetryDisabled: true

@@ -1,0 +1,20 @@
+# Packages with compound SPDX license expressions (e.g. "Apache-2.0 AND MIT")
+# are not recognized by the dependency review action's exact-match allowlist.
+# All combinations below are permissive-only.
+pkg:golang/github.com/puzpuzpuz/xsync/v3
+pkg:golang/go.opentelemetry.io/otel
+pkg:golang/go.opentelemetry.io/otel/exporters/otlp/otlptrace
+pkg:golang/go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc
+pkg:golang/go.opentelemetry.io/otel/metric
+pkg:golang/go.opentelemetry.io/otel/sdk
+pkg:golang/go.opentelemetry.io/otel/trace
+pkg:golang/go.yaml.in/yaml/v2
+pkg:golang/go.yaml.in/yaml/v3
+pkg:golang/golang.org/x/exp
+pkg:golang/golang.org/x/net
+pkg:golang/golang.org/x/sync
+pkg:golang/golang.org/x/sys
+pkg:golang/golang.org/x/text
+pkg:golang/golang.org/x/time
+pkg:golang/google.golang.org/protobuf
+pkg:golang/sigs.k8s.io/yaml

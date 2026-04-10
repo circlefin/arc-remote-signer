@@ -1,0 +1,44 @@
+name: Common CI
+
+on:
+  workflow_call:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    env:
+      APP_ENV: qa
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y protobuf-compiler libprotobuf-dev gcc-aarch64-linux-gnu
+          sudo ln -sf /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+      - name: Run all tests
+        run: make test-all
+
+  required_checks_rollup:
+    name: Build Success Rollup
+    needs:
+      - ci
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          ci_failure="${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}"
+          if [[ $ci_failure == "true" ]]; then
+            echo "Test failure"
+            exit 1
+          else
+            echo "All builds/tests completed successfully."
+            exit 0
+          fi
