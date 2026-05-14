@@ -15,7 +15,7 @@ install-deps:
 proto: install-deps clean
 	@echo "Generating protobuf code with buf..."
 	@mkdir -p ./pb
-	@$(BUF_BIN) generate
+	@PATH="$(GO_BIN):$$PATH" $(BUF_BIN) generate
 	@echo "Done generating protobuf code"
 
 # Lint protocol buffer definitions
