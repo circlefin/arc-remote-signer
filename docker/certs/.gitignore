@@ -1,0 +1,5 @@
+# Ignore all certificates, but keep this directory in-place
+# Custom CA certificates trusted during Docker builds
+# can be added to this directory.
+*
+!.gitignore

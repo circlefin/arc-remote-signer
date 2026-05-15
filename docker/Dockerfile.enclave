@@ -1,0 +1,68 @@
+### Image digest pins
+###
+### WARNING: Changing any of these pins will produce a different enclave image,
+### invalidating the PCR hashes. Update with care and coordinate with any
+### downstream attestation policy that references the current PCR values.
+ARG GOLANG_IMAGE=golang:1.25@sha256:8a7adc288b77e9b787cd2695029eb54d10ae80571b21d44fed68d067ad0a9c96
+ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252
+ARG SOURCE_DATE_EPOCH=0
+ARG SNAPSHOT_DATE=20260501T000000Z
+
+FROM ${GOLANG_IMAGE} AS build-base
+
+# Trust the CA bundle mounted at build time so `buf` and `go` can reach
+# the configured registries (e.g. through a proxy with a custom root CA).
+RUN --mount=type=bind,from=certs,target=/usr/local/share/ca-certificates/ \
+    update-ca-certificates
+
+### Build the app binary inside Docker for a reproducible CGO toolchain.
+FROM build-base AS app-builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+# Generate protobuf code (requires network access to the Buf schema
+# registry at buf.build for module dependencies).
+RUN make -C proto proto
+
+# Build with BLS portability flag and reproducibility flags.
+RUN CGO_ENABLED=1 CGO_CFLAGS="-O2 -D__BLST_PORTABLE__" \
+    go build -trimpath -buildvcs=false -ldflags=-buildid= -o /app .
+
+### Enclave image - self-contained reproducible build.
+FROM ${DEBIAN_IMAGE} AS enclave
+ARG SOURCE_DATE_EPOCH
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+ARG SNAPSHOT_DATE
+
+# Truncate debian.sources to avoid non-deterministic whiteout files.
+RUN --mount=type=bind,from=build-base,source=/etc/ssl/certs,target=/etc/ssl/certs \
+    : > /etc/apt/sources.list.d/debian.sources && \
+    echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${SNAPSHOT_DATE}/ bookworm main" > /etc/apt/sources.list && \
+    echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${SNAPSHOT_DATE}/ bookworm-security main" >> /etc/apt/sources.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        socat iproute2 && \
+    rm -rf /var/lib/apt/lists/* /var/cache/ldconfig/aux-cache && \
+    : > /var/log/dpkg.log && \
+    : > /var/log/apt/eipp.log.xz && \
+    : > /var/log/apt/history.log && \
+    : > /var/log/apt/term.log && \
+    find /etc /usr /var -newermt "@0" -exec touch -hcd "@0" {} + 2>/dev/null || true
+
+# Keep WORKDIR creation and file copy in one layer to avoid fresh timestamps.
+RUN --mount=type=bind,from=app-builder,source=/app,target=/tmp/app \
+    --mount=type=bind,source=configs,target=/tmp/configs \
+    --mount=type=bind,source=docker/run_enclave.sh,target=/tmp/run_enclave.sh \
+    mkdir -p /usr/local/circle && \
+    cp /tmp/app /usr/local/circle/app && \
+    chmod 0750 /usr/local/circle/app && \
+    cp -r /tmp/configs /usr/local/circle/configs && \
+    cp /tmp/run_enclave.sh /usr/local/circle/run_enclave.sh && \
+    chmod 0750 /usr/local/circle/run_enclave.sh && \
+    find /usr/local -newermt "@0" -exec touch -hcd "@0" {} + 2>/dev/null || true
+
+WORKDIR /usr/local/circle
+ENTRYPOINT ["/usr/local/circle/run_enclave.sh"]
