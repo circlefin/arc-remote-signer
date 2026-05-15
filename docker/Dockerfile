@@ -1,10 +1,43 @@
+ARG RUST_IMAGE=rust:1.95-bookworm@sha256:adab7941580c74513aa3347f2d2a1f975498280743d29ec62978ba12e3540d3a
+ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252
+ARG NITRO_CLI_VERSION=v1.4.4
+# SHA256 of the source tarball for ${NITRO_CLI_VERSION}. Verified at build
+# time so a retagged upstream cannot silently change the binary we ship.
+ARG NITRO_CLI_SHA256=5f8182119496a07403b755e1c7e62780acc71ba136639226cdbb508482836e01
+
 ### Build grpc-health-probe from master (404552c) to get grpc v1.79.3 (CVE-2026-33186 fix).
 ### TODO: Revert to `COPY --from=ghcr.io/grpc-ecosystem/grpc-health-probe:<tag>` once a tagged release includes grpc >= v1.79.3.
 FROM golang:1.25 AS grpc-health-probe-builder
-RUN CGO_ENABLED=0 GOBIN=/ go install github.com/grpc-ecosystem/grpc-health-probe@404552c
+
+RUN --mount=type=bind,from=certs,target=/usr/local/share/ca-certificates/ \
+    update-ca-certificates && \
+    CGO_ENABLED=0 GOBIN=/ go install github.com/grpc-ecosystem/grpc-health-probe@404552c
+
+### Build nitro-cli from source. Only the binary is needed at runtime; blobs
+### are only used when building EIFs (handled by the shared CI pipeline).
+FROM ${RUST_IMAGE} AS nitro-cli-builder
+
+ARG NITRO_CLI_VERSION
+ARG NITRO_CLI_SHA256
+
+RUN --mount=type=bind,from=certs,target=/usr/local/share/ca-certificates/ \
+    update-ca-certificates && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends musl-tools && \
+    rm -rf /var/lib/apt/lists/*
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+RUN curl -sSfL -o /tmp/nitro-cli.tar.gz \
+        "https://github.com/aws/aws-nitro-enclaves-cli/archive/refs/tags/${NITRO_CLI_VERSION}.tar.gz" && \
+    echo "${NITRO_CLI_SHA256}  /tmp/nitro-cli.tar.gz" | sha256sum -c - && \
+    tar xzf /tmp/nitro-cli.tar.gz --strip-components=1 && \
+    rm /tmp/nitro-cli.tar.gz && \
+    make nitro-cli-native && \
+    install -D -m 0755 build/nitro_cli/release/nitro-cli /out/usr/bin/nitro-cli && \
+    mkdir -p /out/var/log/nitro_enclaves /out/run/nitro_enclaves
 
 ### This is the base image that all other images inherit from
-FROM ubuntu:22.04 AS base
+FROM ${DEBIAN_IMAGE} AS base
 
 ARG TARGETARCH
 
@@ -14,27 +47,18 @@ COPY --chmod=0750 bin/$TARGETARCH/app ./app
 COPY configs ./configs
 COPY deployments ./deployments
 
+## Copy CA certs from the builder so apt trusts the configured CA bundle
+## (e.g. when the build runs behind a proxy with a custom root CA).
+COPY --from=grpc-health-probe-builder /etc/ssl/certs /etc/ssl/certs
+
 ## Install common dependencies for all targets
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        ca-certificates \
         socat \
         jq && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=grpc-health-probe-builder /grpc-health-probe /usr/local/bin/grpc_health_probe
-
-### This is the image that runs in the nitro enclave
-FROM base AS enclave
-
-## Install network configuration tools needed only in the enclave
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        iproute2 && \
-    rm -rf /var/lib/apt/lists/*
-
-COPY --chmod=0750 docker/run_enclave.sh ./run_enclave.sh
-ENTRYPOINT ["/usr/local/circle/run_enclave.sh"]
 
 ### This is the image that runs outside the nitro enclave, but does not include the enclave binary (EIF file)
 FROM base AS signer
@@ -48,6 +72,15 @@ ENTRYPOINT ["/usr/local/circle/run_proxy.sh"]
 FROM signer AS signer-with-enclave
 
 ARG ENCLAVE_EIF
+ARG ENCLAVE_PCR0=""
+ARG ENCLAVE_PCR1=""
+ARG ENCLAVE_PCR2=""
+
+LABEL enclave.pcr0="${ENCLAVE_PCR0}" \
+      enclave.pcr1="${ENCLAVE_PCR1}" \
+      enclave.pcr2="${ENCLAVE_PCR2}"
+
+COPY --from=nitro-cli-builder /out/ /
 
 COPY $ENCLAVE_EIF ./enclave.eif
 

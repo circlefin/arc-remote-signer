@@ -1,8 +1,11 @@
-# Arc Remote Signer Detailed Documentation
+# Architecture
 
-## Architecture
+This document describes the dual-process architecture, runtime flows, security model, deployment topology, and API surface of Arc Remote Signer.
 
-### Overview
+For day-to-day build/run commands, see [development.md](development.md).
+For test conventions, see [testing.md](testing.md).
+
+## Overview
 
 Arc Remote Signer uses a **dual-process architecture** with a hard security boundary between the Proxy (outside the enclave) and the Enclave (inside the Nitro Enclave). This separation ensures that private key material never exists in the host process — all cryptographic operations happen exclusively inside the hardware-isolated enclave.
 
@@ -39,11 +42,11 @@ The two processes communicate over **gRPC on vsock** (virtual socket), which is 
 
 The enclave binary is packaged as an **Enclave Image File (EIF)**, which is cryptographically measured at build time. The PCR measurements in the attestation document reflect this image, allowing KMS key policies to enforce that decryption can only happen inside a known, unmodified enclave build.
 
-### Runtime Flows
+## Runtime Flows
 
 The following sections describe how the two processes interact at runtime, from initial startup through key generation and steady-state signing.
 
-#### Startup Sequence
+### Startup Sequence
 
 On startup, the Proxy fetches and caches the attestation document from the Enclave before handling any requests. This cached attestation is attached to all subsequent KMS API calls. The attestation document contains the enclave's public key and PCR measurements — KMS uses this to verify enclave identity and encrypts its response with the enclave's public key, so the plaintext data key is never exposed outside the enclave.
 
@@ -60,7 +63,7 @@ Proxy                                          Enclave
   [ready to serve requests]
 ```
 
-#### Key Generation Flow
+### Key Generation Flow
 
 Key generation is triggered on first startup when no key is found in Secrets Manager for the configured key ID:
 
@@ -92,7 +95,7 @@ Proxy                             AWS KMS              Enclave               Sec
 
 The Proxy caches `encrypted_private_key`, `kms_encrypted_data_key`, and `nonce` in memory. The plaintext private key exists only inside the enclave's memory-isolated environment.
 
-#### Signing Flow
+### Signing Flow
 
 Because the Proxy caches the encrypted key material after generation (or after loading from Secrets Manager), signing does not require a round-trip to Secrets Manager or KMS on the hot path:
 
@@ -185,54 +188,24 @@ Enclave                  Proxy                        AWS KMS
    │   key can decrypt)     │                              │
 ```
 
-## Development
-
-Local development uses `deployments/docker-compose.yaml` with localstack to simulate AWS services. All workflows are driven through `make` targets, which handle dependency ordering automatically.
-
-**Dependencies**
-
-| Command | Description |
-|---------|-------------|
-| `make up` | Build local enclave Docker image and start localstack |
-| `make down` | Stop localstack |
-| `make dev` | `make up` + launch the app (typical dev entry point) |
-
-**Build**
-
-| Command | Description |
-|---------|-------------|
-| `make proto` | Regenerate protocol buffer Go code |
-| `make build` | Generate protos and build binary to `./bin/app` |
-
-**Test**
-
-| Command | Scope | Requires |
-|---------|-------|----------|
-| `make test` | Unit + lint | — |
-| `make test-it` | Unit + integration | localstack |
-| `make smoke` | Smoke (end-to-end) | running service |
-| `make test-all` | All of the above | localstack + running service |
-
-Test files are co-located with source and use build tags to control scope: integration tests use `//go:build integration` (`*_integration_test.go`), smoke tests use `//go:build smoke` (`internal/smoke/`).
-
 ## Deployment
 
 Arc Remote Signer is deployed as a 1-to-1 sidecar alongside each Arc Chain validator node using Docker containers on AWS EC2 instances with Nitro Enclaves enabled.
 
 ### Docker Images
 
-The project uses `docker buildx bake` (configured in `docker-bake.hcl`) to build three Docker image targets defined in `docker/Dockerfile`:
+The project uses `docker buildx bake` (configured in `docker-bake.hcl`) to build three Docker image targets across two Dockerfiles. The `enclave` target lives in `docker/Dockerfile.enclave` (built reproducibly), and `signer` / `signer-with-enclave` live in `docker/Dockerfile`:
 
-1. **enclave** - Runs inside AWS Nitro Enclave
+1. **enclave** (`docker/Dockerfile.enclave`) — Runs inside AWS Nitro Enclave
    - Contains the enclave application binary
    - Listens on port `10350` (internal vsock communication only)
    - Entry point: `run_enclave.sh`
-2. **signer** - Runs as proxy outside the enclave
+2. **signer** (`docker/Dockerfile`) — Runs as proxy outside the enclave
    - Handles external gRPC requests
    - Communicates with enclave via vsock
    - Listens on port `10340` for gRPC API
    - Entry point: `run_proxy.sh`
-3. **signer-with-enclave** - Complete production setup
+3. **signer-with-enclave** (`docker/Dockerfile`) — Complete production setup
    - Includes both proxy and enclave applications
    - Contains the enclave image file (EIF)
    - Manages enclave lifecycle automatically
@@ -240,19 +213,47 @@ The project uses `docker buildx bake` (configured in `docker-bake.hcl`) to build
 
 ### Building Images
 
+#### Local `signer` image (macOS or Linux)
+
+A single `make` target builds the Go binary and the host-arch Docker image for the `signer` target — recommended for local development against a mock enclave (no `nitro-cli` or EIF needed):
+
 ```bash
-# Build all images
-docker buildx bake
+# macOS (Apple Silicon → arm64 image)
+make local-enclave-docker
 
-# Build specific target
-docker buildx bake signer
-
-# Build with enclave (requires EIF file)
-docker buildx bake --set "signer-with-enclave.args.ENCLAVE_EIF=path/to/enclave.eif" signer-with-enclave
-
-# Build just the enclave image
-docker buildx bake enclave
+# Linux or when you need a linux/amd64 image
+APP_ENV=qa make local-enclave-docker
 ```
+
+`APP_ENV=qa` is the toggle that switches `scripts/build.sh` into cross-compiling `linux/amd64` so Docker's `COPY bin/$TARGETARCH/app` resolves correctly.
+
+#### Production image with bundled enclave (`signer-with-enclave`)
+
+The `signer-with-enclave` target bundles a real Enclave Image File (EIF). Building the EIF only requires the `nitro-cli` binary — **a Nitro-Enclaves-enabled EC2 host is not needed to build an EIF**; that is only required to run an enclave.
+
+1. Install `nitro-cli` by following the official AWS guide: https://docs.aws.amazon.com/enclaves/latest/user/nitro-enclave-cli-install.html
+
+2. Run the end-to-end build:
+
+   ```bash
+   # 1. Build the linux/amd64 host binary
+   APP_ENV=qa make build
+
+   # 2. Build the enclave Docker image
+   docker buildx bake enclave
+
+   # 3. Package the Docker image into an EIF
+   nitro-cli build-enclave \
+     --docker-uri nitro-enclave-signer/enclave:latest \
+     --output-file enclave.eif
+
+   # 4. Bundle the EIF into the final signer-with-enclave image
+   docker buildx bake \
+     --set "signer-with-enclave.args.ENCLAVE_EIF=./enclave.eif" \
+     signer-with-enclave
+   ```
+
+The resulting EIF is unsigned, which is fine for local builds. Production builds pass `--signing-certificate` and `--private-key` (via AWS KMS) to `nitro-cli build-enclave` so the EIF carries a PCR8 measurement that can be enforced in KMS key policies.
 
 ### AWS Prerequisites
 
@@ -278,7 +279,7 @@ All environment variables use the `APP_` prefix. Nested keys use underscore styl
 ```bash
 # Required - AWS configuration
 export APP_PROVIDER_SECRETS_LOCALSTACK_REGION=us-east-1
-export APP_PROVIDER_AWSKMS_ARNS=arn:aws:kms:us-east-1:123456789:key/abc-123
+export APP_PROVIDER_AWSKMS_ARNS=arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab
 export APP_SERVICE_SIGNER_KEYID=your-secret-id
 
 # Enclave configuration
@@ -302,7 +303,7 @@ Example config file (`configs/app.yaml`):
 ```yaml
 provider:
   awskms:
-    arns: arn:aws:kms:us-east-1:123456789:key/abc-123
+    arns: arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab
   secrets:
     localstack:
       region: us-east-1

@@ -28,4 +28,10 @@ else
     fi
 
     go build -o "${BIN_DIR}/app" "${PROJECT_DIR}"
+    # Ensure bin/$GOARCH/app exists so Docker's COPY bin/$TARGETARCH/app works.
+    GOARCH_DIR="${BIN_DIR}/$(go env GOARCH)"
+    if [ ! -f "${GOARCH_DIR}/app" ]; then
+        mkdir -p "${GOARCH_DIR}"
+        cp "${BIN_DIR}/app" "${GOARCH_DIR}/app"
+    fi
 fi

@@ -63,7 +63,9 @@ If all tests pass, the service is ready to use!
 
 ## Documentation
 
-For detailed deployment, development, security, API reference, and troubleshooting guidance, see [`DOCUMENTATION.md`](./DOCUMENTATION.md).
+- [`docs/architecture.md`](./docs/architecture.md) — dual-process architecture, runtime flows, security model, deployment, API reference, troubleshooting
+- [`docs/development.md`](./docs/development.md) — prerequisites, build/run commands, coding conventions, pre-commit hooks
+- [`docs/testing.md`](./docs/testing.md) — test matrix and conventions
 
 ## Architecture
 
@@ -111,7 +113,7 @@ Arc Remote Signer uses a **dual-process architecture** with clear security bound
 
 3. **Communication Layer** - Proxy and enclave communicate via gRPC over vsock (virtual socket), ensuring type-safe, versioned contracts between trust boundaries. Validator nodes communicate with the Proxy via standard gRPC.
 
-For detailed layer architecture and shared infrastructure, see [`DOCUMENTATION.md`](./DOCUMENTATION.md).
+For detailed layer architecture and shared infrastructure, see [`docs/architecture.md`](./docs/architecture.md).
 
 ## Usage
 
@@ -189,9 +191,28 @@ This full-featured API is used exclusively by the Proxy to communicate with the 
 
 Arc Remote Signer is deployed as a 1-to-1 sidecar with Arc Chain validator nodes on Nitro-enabled AWS EC2 instances.
 
+## Reproducible Enclave Builds
+
+The enclave Docker image is built reproducibly — identical source produces bit-for-bit identical images across builds. This ensures the PCR0 hash (derived from the enclave image) is stable and predictable, which is critical for attestation policy.
+
+The enclave build uses a dedicated `docker/Dockerfile.enclave`, separate from the main `docker/Dockerfile` used by the signer targets. Key techniques:
+- **Digest-pinned base images** (Go toolchain + Debian)
+- **Snapshot-pinned apt** via `snapshot.debian.org` for deterministic packages
+- **In-Docker Go build** with `-trimpath -buildvcs=false -ldflags=-buildid=`
+- **Timestamp clamping** via `SOURCE_DATE_EPOCH` and targeted `find/touch`
+- **Bind mounts** instead of `COPY` to avoid wall-clock layer timestamps
+
+To verify locally:
+
+```bash
+make test-reproducibility
+```
+
+> **Note:** Updating any digest pin in `docker/Dockerfile.enclave` will change the enclave image and invalidate existing PCR hashes. See the warning in the Dockerfile header.
+
 ## Development
 
-This project uses `make` targets as the standard workflow entry points. For full command details and troubleshooting, see [`DOCUMENTATION.md`](./DOCUMENTATION.md).
+This project uses `make` targets as the standard workflow entry points. For full command details, conventions, and pre-commit hooks, see [`docs/development.md`](./docs/development.md).
 
 ### Project Structure
 
@@ -235,7 +256,7 @@ Arc Remote Signer exposes:
 
 ## Troubleshooting
 
-See the troubleshooting section in [`DOCUMENTATION.md`](./DOCUMENTATION.md).
+See the troubleshooting section in [`docs/architecture.md`](./docs/architecture.md#troubleshooting).
 
 ## Contributing
 
@@ -297,7 +318,7 @@ This project was developed by the Circle engineering team.
 
 For questions, issues, or discussions:
 - **GitHub Issues**: Report bugs and request features
-- **Documentation**: See [`DOCUMENTATION.md`](./DOCUMENTATION.md) for project architecture and testing guidelines
+- **Documentation**: See [`docs/architecture.md`](./docs/architecture.md) for architecture and [`docs/development.md`](./docs/development.md) for development guidelines
 
 ---
 

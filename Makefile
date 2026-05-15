@@ -3,7 +3,7 @@ SCRIPTS := ./scripts
 ENCLAVE_NAME := nitro-enclave-signer-internal
 
 .DEFAULT_GOAL := help
-.PHONY: proto build local-enclave-docker test test-it test-all smoke dev up down help
+.PHONY: proto build local-enclave-docker test test-it test-all smoke test-reproducibility dev up down help
 
 #------------------------------------------------------------------------------
 # Build
@@ -32,6 +32,9 @@ test-all: test-it smoke ## Run all tests
 
 smoke: up ## Run smoke tests only
 	@$(SCRIPTS)/smoke.sh
+
+test-reproducibility: ## Verify enclave build reproducibility
+	@$(SCRIPTS)/test-build-enclave.sh
 
 #------------------------------------------------------------------------------
 # Development
