@@ -15,6 +15,8 @@
 package public
 
 import (
+	"fmt"
+
 	"github.com/circlefin/arc-remote-signer/internal/common/config"
 	grpcServer "github.com/circlefin/arc-remote-signer/internal/common/grpc/server"
 	"github.com/circlefin/arc-remote-signer/internal/common/lifecycle"
@@ -33,11 +35,16 @@ type CreateServerParams struct {
 
 // New creates a new public server that implements lifecycle.Runnable for the app service.
 func New(cfg *grpcServer.Config, params CreateServerParams) (lifecycle.Runnable, error) {
+	opts, err := grpcServer.WithTLS(cfg.TLS)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load TLS options: %w", err)
+	}
+
 	grpcSrv := grpcServer.NewServer(grpcServer.RequiredEngineParams{
 		ServiceName:     params.ServiceName,
 		Env:             params.Env,
 		APIStatsService: params.APIStatsSvc,
-	})
+	}, opts...)
 	reflection.Register(grpcSrv)
 	pb.RegisterSignerServiceServer(grpcSrv, params.SignerSvc)
 

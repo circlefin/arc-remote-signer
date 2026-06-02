@@ -112,3 +112,9 @@ func waitForStatus(t *testing.T, client grpcHealthV1.HealthClient, service strin
 	}
 	require.Failf(t, "health status timeout", "health status for service %q did not become %s", service, want.String())
 }
+
+func TestWithTLS_NotEnabled(t *testing.T) {
+	opts, err := WithTLS(nil)
+	require.NoError(t, err)
+	require.Len(t, opts, 0)
+}
