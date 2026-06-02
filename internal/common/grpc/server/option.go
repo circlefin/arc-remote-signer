@@ -85,6 +85,7 @@ func WithHealthServer(serviceNames ...string) RunnableOption {
 // WithTLS creates a TLS server option from the given TLS configuration.
 func WithTLS(cfg *TLSConfig) ([]grpc.ServerOption, error) {
 	if cfg != nil && cfg.Enabled {
+		fmt.Printf("Loading TLS config... \n")
 		cert, err := tls.LoadX509KeyPair(cfg.Cert, cfg.Key)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
