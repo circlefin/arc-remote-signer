@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/circlefin/arc-remote-signer/internal/app/metrics"
 	"github.com/circlefin/arc-remote-signer/internal/app/provider/awskms"
 	enclaveProvider "github.com/circlefin/arc-remote-signer/internal/app/provider/enclave"
 	"github.com/circlefin/arc-remote-signer/internal/app/provider/secrets"
@@ -32,8 +33,9 @@ import (
 )
 
 type metricProviders struct {
-	stats metric.StatsService
-	api   metric.APIStatsService
+	stats      metric.StatsService
+	api        metric.APIStatsService
+	prometheus *metric.Prometheus
 }
 
 var _logger *logging.Logger
@@ -78,6 +80,10 @@ func Run(cfg *Config) {
 		logger.Info(ctx, "Profiler is not enabled", nil)
 	}
 
+	logger.Info(ctx, "initializing the metric services...", nil)
+	// init metrics here
+	appMetricProviders := initializeMetricsProviders(ctx, cfg.Metrics)
+
 	logger.Info(ctx, "initializing the providers...", nil)
 	enclavePvd, conn, err := enclaveProvider.New(cfg.Provider.Enclave)
 	if err != nil {
@@ -111,15 +117,11 @@ func Run(cfg *Config) {
 	}
 
 	logger.Info(ctx, "initializing the services...", nil)
-	signerSvc, err := signer.New(ctx, cfg.Provider.Enclave.NitroEnclave.Enabled, cfg.Service.Signer, secretPvd, enclavePvd, awskmsPvd)
+	signerSvc, err := signer.New(ctx, cfg.Provider.Enclave.NitroEnclave.Enabled, cfg.Service.Signer, secretPvd, enclavePvd, awskmsPvd, appMetricProviders.prometheus)
 	if err != nil {
 		logger.ErrorErr(ctx, "failed to initialize the signer service", err, nil)
 		panic(err)
 	}
-
-	logger.Info(ctx, "initializing the metric services...", nil)
-	// init metrics here
-	appMetricProviders := initializeMetricsProviders(ctx, cfg.Metrics)
 
 	lc := lifecycle.NewManager()
 
@@ -137,6 +139,15 @@ func Run(cfg *Config) {
 
 	lc.Manage(publicServer)
 
+	metricsServer, err := metrics.New(cfg.Metrics, appMetricProviders.prometheus)
+	if err != nil {
+		logger.ErrorErr(ctx, "failed to initialize the metrics server", err, nil)
+		panic(err)
+	}
+	if metricsServer != nil {
+		lc.Manage(metricsServer)
+	}
+
 	logger.Info(ctx, "run all runnable", nil)
 	lc.Run()
 }
@@ -146,15 +157,26 @@ func initializeMetricsProviders(ctx context.Context, metricsCfg *metric.Config) 
 		panic("metrics config unavailable")
 	}
 
-	statsService, err := metric.NewDatadogStatsD(metricsCfg.Statsd)
-	if err != nil {
-		getLogger().Error(ctx, "failed to initialize the metric service", logging.Entries{"error": err})
-		panic(err)
+	var statsService metric.StatsService
+	var apiStatsService metric.APIStatsService
+	if metricsCfg.IsStatsdEnabled() {
+		statsService, err := metric.NewDatadogStatsD(metricsCfg.Statsd)
+		if err != nil {
+			getLogger().Error(ctx, "failed to initialize the metric service", logging.Entries{"error": err})
+			panic(err)
+		}
+		apiStatsService = metric.NewAPIStatsServiceImpl(statsService, metric.WithDistributionsOption(metric.DistributionsEnabled))
+	}
+
+	var prometheus *metric.Prometheus
+	if metricsCfg.IsPrometheusEnabled() {
+		prometheus = metric.NewPrometheus()
 	}
 
 	return metricProviders{
-		stats: statsService,
-		api:   metric.NewAPIStatsServiceImpl(statsService, metric.WithDistributionsOption(metric.DistributionsEnabled)),
+		stats:      statsService,
+		api:        apiStatsService,
+		prometheus: prometheus,
 	}
 }
 

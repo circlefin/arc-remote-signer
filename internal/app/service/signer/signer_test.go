@@ -452,7 +452,7 @@ func (s *SignerServiceTestSuite) TestServiceInitialization() {
 				KeyID:     testKeyID,
 			}
 			tt.mockSetup()
-			service, err := New(context.Background(), false, config, s.mockSecretsPvd, s.mockEnclavePvd, s.mockAWSKMSPvd)
+			service, err := New(context.Background(), false, config, s.mockSecretsPvd, s.mockEnclavePvd, s.mockAWSKMSPvd, nil)
 			if tt.wantError {
 				s.Require().Error(err)
 				s.Require().Nil(service)
@@ -511,7 +511,7 @@ func (s *SignerServiceTestSuite) setupInitializedService() {
 		Return(testSecretID, nil)
 
 	cfg := NewConfig()
-	initializedService, err := New(context.Background(), false, cfg, s.mockSecretsPvd, s.mockEnclavePvd, s.mockAWSKMSPvd)
+	initializedService, err := New(context.Background(), false, cfg, s.mockSecretsPvd, s.mockEnclavePvd, s.mockAWSKMSPvd, nil)
 	s.Require().NoError(err)
 	s.initializedService = initializedService
 }

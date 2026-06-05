@@ -36,6 +36,12 @@ profiler:
   enabled: true
 metrics:
   statsd:
+    enabled: false
     host: 127.0.0.1
     port: 8125
-    telemetryDisabled: true
+    telemetryDisabled: false
+  prometheus:
+    enabled: true
+    host: 0.0.0.0
+    port: 9090
+    path: /metrics
