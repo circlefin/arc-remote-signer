@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"sync"
 
 	"github.com/circlefin/arc-remote-signer/internal/app/metrics"
@@ -289,9 +288,7 @@ func toPBAlgorithm(algorithm crypto.Algorithm) (pb.Algorithm, error) {
 }
 
 func (s *Service) increment(name string, label string) {
-	log.Printf("incrementing metric %s with label %s", name, label)
 	if s.prometheus == nil {
-		log.Printf("prometheus is not initialized")
 		return
 	}
 	s.prometheus.IncrementLabel(name, label)
