@@ -13,16 +13,19 @@
 
 package server
 
-// Config represents the configuration for the gRPC server.
-type Config struct {
-	Host string     `mapstructure:"host"`
-	Port int        `mapstructure:"port"`
-	TLS  *TLSConfig `mapstructure:"tls"`
-}
+import (
+	"fmt"
+	"net/http"
+	"testing"
 
-// TLSConfig represents the TLS configuration to the gRPC server.
-type TLSConfig struct {
-	Enabled bool   `mapstructure:"enabled"`
-	Cert    string `mapstructure:"cert"`
-	Key     string `mapstructure:"key"`
+	"github.com/stretchr/testify/require"
+)
+
+func TestWithListener_ReturnsNoError(t *testing.T) {
+	r := &RunnableImpl{server: &http.Server{}}
+	port := freeTCPPort(t)
+	require.NoError(t, WithListener("127.0.0.1", port)(r))
+	require.NotNil(t, r.listener)
+	require.Equal(t, fmt.Sprintf("127.0.0.1:%d", port), r.listener.Addr().String())
+	_ = r.listener.Close()
 }

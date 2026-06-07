@@ -13,16 +13,22 @@
 
 package server
 
-// Config represents the configuration for the gRPC server.
-type Config struct {
-	Host string     `mapstructure:"host"`
-	Port int        `mapstructure:"port"`
-	TLS  *TLSConfig `mapstructure:"tls"`
-}
+import (
+	"fmt"
+	"net"
+)
 
-// TLSConfig represents the TLS configuration to the gRPC server.
-type TLSConfig struct {
-	Enabled bool   `mapstructure:"enabled"`
-	Cert    string `mapstructure:"cert"`
-	Key     string `mapstructure:"key"`
+// RunnableOption customizes RunnableServer behavior.
+type RunnableOption func(*RunnableImpl) error
+
+// WithListener creates and configures a listener using the given transport.
+func WithListener(host string, port uint32) RunnableOption {
+	return func(r *RunnableImpl) error {
+		listener, err := net.Listen("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", port)))
+		if err != nil {
+			return err
+		}
+		r.listener = listener
+		return nil
+	}
 }

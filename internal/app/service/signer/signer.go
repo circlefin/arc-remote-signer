@@ -22,10 +22,12 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/circlefin/arc-remote-signer/internal/app/metrics"
 	"github.com/circlefin/arc-remote-signer/internal/app/provider/awskms"
 	"github.com/circlefin/arc-remote-signer/internal/app/provider/secrets"
 	"github.com/circlefin/arc-remote-signer/internal/common/crypto"
 	"github.com/circlefin/arc-remote-signer/internal/common/logging"
+	"github.com/circlefin/arc-remote-signer/internal/common/metric"
 	"github.com/circlefin/arc-remote-signer/proto/pb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -59,10 +61,11 @@ type Service struct {
 	awskmsPvd             awskms.Provider
 	algorithm             pb.Algorithm
 	cache                 *cache
+	prometheus            *metric.Prometheus
 }
 
 // New creates a new instance of the Signer gRPC server.
-func New(ctx context.Context, isNitroEnclaveEnabled bool, keyCfg *Config, secretPvd secrets.Provider, enclavePvd pb.EnclaveServiceClient, awskmsPvd awskms.Provider) (*Service, error) {
+func New(ctx context.Context, isNitroEnclaveEnabled bool, keyCfg *Config, secretPvd secrets.Provider, enclavePvd pb.EnclaveServiceClient, awskmsPvd awskms.Provider, prometheus *metric.Prometheus) (*Service, error) {
 	pbAlgorithm, err := toPBAlgorithm(keyCfg.Algorithm)
 	if err != nil {
 		return nil, err
@@ -74,6 +77,7 @@ func New(ctx context.Context, isNitroEnclaveEnabled bool, keyCfg *Config, secret
 		awskmsPvd:             awskmsPvd,
 		algorithm:             pbAlgorithm,
 		cache:                 newCache(),
+		prometheus:            prometheus,
 	}
 	if err := service.initialize(ctx, keyCfg); err != nil {
 		return nil, err
@@ -190,10 +194,13 @@ func (s *Service) loadKeyFromSecret(ctx context.Context, secret []byte) error {
 // PublicKey returns the cached signer public key.
 // It returns a gRPC internal error when the service has not been initialized.
 func (s *Service) PublicKey(_ context.Context, _ *pb.PublicKeyRequest) (*pb.PublicKeyResponse, error) {
+	s.increment(metrics.RequestTotalCounter, "publickey")
 	cached := s.cache.get()
 	if cached == nil {
+		s.increment(metrics.RequestTotalCounterError, "publickey")
 		return nil, status.Error(codes.Internal, errServiceNotInitialized)
 	}
+	s.increment(metrics.RequestTotalCounterSuccess, "publickey")
 	return &pb.PublicKeyResponse{
 		PublicKey: cached.publicKey,
 	}, nil
@@ -204,15 +211,19 @@ func (s *Service) PublicKey(_ context.Context, _ *pb.PublicKeyRequest) (*pb.Publ
 // It returns gRPC status errors for invalid input and uninitialized service state.
 func (s *Service) Sign(ctx context.Context, req *pb.SignRequest) (*pb.SignResponse, error) {
 	// Validate request
+	s.increment(metrics.RequestTotalCounter, "sign")
 	if req == nil {
+		s.increment(metrics.RequestTotalCounterError, "sign")
 		return nil, status.Error(codes.InvalidArgument, errInvalidRequest)
 	}
 	if len(req.Message) == 0 {
+		s.increment(metrics.RequestTotalCounterError, "sign")
 		return nil, status.Error(codes.InvalidArgument, errEmptyMessage)
 	}
 
 	cached := s.cache.get()
 	if cached == nil {
+		s.increment(metrics.RequestTotalCounterError, "sign")
 		return nil, status.Error(codes.Internal, errServiceNotInitialized)
 	}
 
@@ -223,6 +234,7 @@ func (s *Service) Sign(ctx context.Context, req *pb.SignRequest) (*pb.SignRespon
 		Message:              req.Message,
 	})
 	if err != nil {
+		s.increment(metrics.RequestTotalCounterError, "sign")
 		getLogger().ErrorErr(ctx, errSignMessage, err, nil)
 		// Preserve the original gRPC status code from the enclave
 		if st, ok := status.FromError(err); ok {
@@ -232,6 +244,7 @@ func (s *Service) Sign(ctx context.Context, req *pb.SignRequest) (*pb.SignRespon
 		return nil, status.Error(codes.Internal, errSignMessage)
 	}
 	// Convert the response back to protobuf format
+	s.increment(metrics.RequestTotalCounterSuccess, "sign")
 	return &pb.SignResponse{
 		Signature: resp.Signature,
 	}, nil
@@ -272,4 +285,11 @@ func toPBAlgorithm(algorithm crypto.Algorithm) (pb.Algorithm, error) {
 	default:
 		return pb.Algorithm_ALGORITHM_UNSPECIFIED, fmt.Errorf("unknown algorithm: %s", algorithm)
 	}
+}
+
+func (s *Service) increment(name string, label string) {
+	if s.prometheus == nil {
+		return
+	}
+	s.prometheus.IncrementLabel(name, label)
 }

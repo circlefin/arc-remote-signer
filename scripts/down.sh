@@ -12,7 +12,7 @@ fi
 
 if [ "${USE_LOCALSTACK:-false}" = "true" ]; then
     ## Stop localstack container
-    docker-compose -f "${PROJECT_DIR}/deployments/docker-compose.yaml" down localstack
+    docker compose -f "${PROJECT_DIR}/deployments/docker-compose.yaml" down localstack
 fi
 
-docker-compose -f "${PROJECT_DIR}/deployments/docker-compose.yaml" down --remove-orphans
+docker compose -f "${PROJECT_DIR}/deployments/docker-compose.yaml" down --remove-orphans
