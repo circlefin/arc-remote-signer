@@ -68,16 +68,21 @@ func (s *RunnableImpl) Run() error {
 }
 
 // Shutdown gracefully stops the http server.
-func (s *RunnableImpl) Shutdown(_ context.Context) error {
+func (s *RunnableImpl) Shutdown(ctx context.Context) error {
 	for _, fn := range s.beforeShutdownFns {
 		fn()
 	}
-	log.Printf("initiating graceful shutdown of http server at %s", s.listener.Addr().String())
+	addr := "unknown"
 	if s.listener != nil {
-		_ = s.listener.Close()
+		addr = s.listener.Addr().String()
+	}
+	log.Printf("initiating graceful shutdown of http server at %s", addr)
+
+	if err := s.server.Shutdown(ctx); err != nil {
+		return fmt.Errorf("failed to shutdown http server: %w", err)
 	}
 	log.Printf("http server gracefully stopped")
-	return s.server.Shutdown(context.Background())
+	return nil
 }
 
 // Name returns the configured service name.
