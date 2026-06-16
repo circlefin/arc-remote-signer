@@ -2,6 +2,12 @@ public:
   server:
     host: 0.0.0.0
     port: 10340
+    # tls secures the malachite -> sidecar gRPC connection. Disabled by default.
+    # When enabled, cert and key must point to a PEM-encoded X509 key pair.
+    tls:
+      enabled: false
+      cert: ""
+      key: ""
 service:
   signer:
     keyId: "00000000-0000-0000-0000-000000000000"
@@ -39,3 +45,11 @@ metrics:
     host: 127.0.0.1
     port: 8125
     telemetryDisabled: true
+  # prometheus exposes a /metrics HTTP endpoint with gRPC server metrics
+  # (request totals by method/status code and handling latency) plus Go runtime
+  # and process collectors. Disabled by default.
+  prometheus:
+    enabled: false
+    host: 0.0.0.0
+    port: 9090
+    path: /metrics

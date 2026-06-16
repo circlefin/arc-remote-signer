@@ -86,6 +86,9 @@ func NewConfig() *Config {
 			Server: &grpcServer.Config{
 				Host: "0.0.0.0",
 				Port: 8080,
+				// Initialized so APP_PUBLIC_SERVER_TLS_* env overrides bind even
+				// when the config file omits the tls block. Disabled by default.
+				TLS: &grpcServer.TLSConfig{Enabled: false},
 			},
 		},
 		Profiler: &ProfilerConfig{

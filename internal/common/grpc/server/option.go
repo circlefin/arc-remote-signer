@@ -15,9 +15,12 @@ package server
 
 import (
 	"fmt"
+	"log"
 	"net"
 
 	"github.com/mdlayher/vsock"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	grpcHealth "google.golang.org/grpc/health"
 	grpcHealthV1 "google.golang.org/grpc/health/grpc_health_v1"
 )
@@ -77,4 +80,20 @@ func WithHealthServer(serviceNames ...string) RunnableOption {
 		})
 		return nil
 	}
+}
+
+// WithTLS creates a TLS server option from the given TLS configuration.
+func WithTLS(cfg *TLSConfig) ([]grpc.ServerOption, error) {
+	if cfg != nil && cfg.Enabled {
+		if cfg.Cert == "" || cfg.Key == "" {
+			return nil, fmt.Errorf("TLS is enabled but cert/key paths are not configured")
+		}
+		log.Printf("loading TLS config for gRPC server")
+		creds, err := credentials.NewServerTLSFromFile(cfg.Cert, cfg.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load TLS credentials: %w", err)
+		}
+		return []grpc.ServerOption{grpc.Creds(creds)}, nil
+	}
+	return []grpc.ServerOption{}, nil
 }

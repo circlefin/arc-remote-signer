@@ -66,7 +66,8 @@ target "enclave-meta-target" {
   }
 
   tags   = ["nitro-enclave-signer/enclave:latest"]
-  output = CI ? [] : ["type=docker"]
+  // rewrite-timestamp requires BuildKit >= 0.13.0
+  output = ["type=docker,rewrite-timestamp=true"]
 }
 
 target "enclave" {

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/circlefin/arc-remote-signer/internal/app/metrics"
 	"github.com/circlefin/arc-remote-signer/internal/app/provider/awskms"
 	enclaveProvider "github.com/circlefin/arc-remote-signer/internal/app/provider/enclave"
 	"github.com/circlefin/arc-remote-signer/internal/app/provider/secrets"
@@ -32,8 +33,9 @@ import (
 )
 
 type metricProviders struct {
-	stats metric.StatsService
-	api   metric.APIStatsService
+	stats      metric.StatsService
+	api        metric.APIStatsService
+	prometheus *metric.Prometheus
 }
 
 var _logger *logging.Logger
@@ -129,6 +131,7 @@ func Run(cfg *Config) {
 		Env:         cfg.Env,
 		APIStatsSvc: appMetricProviders.api,
 		SignerSvc:   signerSvc,
+		Prometheus:  appMetricProviders.prometheus,
 	})
 	if err != nil {
 		logger.ErrorErr(ctx, "failed to initialize the public server", err, nil)
@@ -136,6 +139,15 @@ func Run(cfg *Config) {
 	}
 
 	lc.Manage(publicServer)
+
+	metricsServer, err := metrics.New(cfg.Metrics, appMetricProviders.prometheus)
+	if err != nil {
+		logger.ErrorErr(ctx, "failed to initialize the metrics server", err, nil)
+		panic(err)
+	}
+	if metricsServer != nil {
+		lc.Manage(metricsServer)
+	}
 
 	logger.Info(ctx, "run all runnable", nil)
 	lc.Run()
@@ -152,9 +164,15 @@ func initializeMetricsProviders(ctx context.Context, metricsCfg *metric.Config) 
 		panic(err)
 	}
 
+	var prometheusProvider *metric.Prometheus
+	if metricsCfg.IsPrometheusEnabled() {
+		prometheusProvider = metric.NewPrometheus()
+	}
+
 	return metricProviders{
-		stats: statsService,
-		api:   metric.NewAPIStatsServiceImpl(statsService, metric.WithDistributionsOption(metric.DistributionsEnabled)),
+		stats:      statsService,
+		api:        metric.NewAPIStatsServiceImpl(statsService, metric.WithDistributionsOption(metric.DistributionsEnabled)),
+		prometheus: prometheusProvider,
 	}
 }
 

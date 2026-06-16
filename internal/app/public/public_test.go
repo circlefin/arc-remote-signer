@@ -18,6 +18,7 @@ import (
 
 	"github.com/circlefin/arc-remote-signer/internal/common/config"
 	grpcServer "github.com/circlefin/arc-remote-signer/internal/common/grpc/server"
+	"github.com/circlefin/arc-remote-signer/internal/common/metric"
 	"github.com/circlefin/arc-remote-signer/proto/pb"
 	"github.com/stretchr/testify/require"
 )
@@ -32,6 +33,40 @@ func TestNew_ReturnsRunnableWithServiceName(t *testing.T) {
 		ServiceName: "app.public",
 		SignerSvc:   &pb.UnimplementedSignerServiceServer{},
 		Env:         config.Dev,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, runnable)
+	require.Equal(t, "app.public", runnable.Name())
+}
+
+func TestNew_ReturnsErrorWhenTLSConfigInvalid(t *testing.T) {
+	cfg := &grpcServer.Config{
+		Host: "127.0.0.1",
+		Port: 0,
+		TLS:  &grpcServer.TLSConfig{Enabled: true},
+	}
+
+	runnable, err := New(cfg, CreateServerParams{
+		ServiceName: "app.public",
+		SignerSvc:   &pb.UnimplementedSignerServiceServer{},
+		Env:         config.Dev,
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to load TLS options")
+	require.Nil(t, runnable)
+}
+
+func TestNew_WithPrometheusProvider(t *testing.T) {
+	cfg := &grpcServer.Config{
+		Host: "127.0.0.1",
+		Port: 0,
+	}
+
+	runnable, err := New(cfg, CreateServerParams{
+		ServiceName: "app.public",
+		SignerSvc:   &pb.UnimplementedSignerServiceServer{},
+		Env:         config.Dev,
+		Prometheus:  metric.NewPrometheus(),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, runnable)
