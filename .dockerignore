@@ -1,0 +1,11 @@
+.git/
+.github/
+.claude/
+.cursor/
+.agents/
+coverage/
+test_results/
+logs/
+artifacts/
+!artifacts/nitro-enclave-image/
+deploy/

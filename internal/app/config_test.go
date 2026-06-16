@@ -190,6 +190,29 @@ func TestNewConfig(t *testing.T) {
 	require.False(t, cfg.Profiler.Enabled)
 }
 
+func TestNewConfig_TLSDefaultEnablesEnvBinding(t *testing.T) {
+	cfg := NewConfig()
+
+	// TLS must be materialized (non-nil) so the loader registers the
+	// public.server.tls.* keys and APP_PUBLIC_SERVER_TLS_* env vars can bind.
+	require.NotNil(t, cfg.Public.Server.TLS)
+	require.False(t, cfg.Public.Server.TLS.Enabled)
+}
+
+func TestLoadConfig_TLSEnvOverride(t *testing.T) {
+	t.Setenv("APP_PUBLIC_SERVER_TLS_ENABLED", "true")
+	t.Setenv("APP_PUBLIC_SERVER_TLS_CERT", "/etc/tls/server.crt")
+	t.Setenv("APP_PUBLIC_SERVER_TLS_KEY", "/etc/tls/server.key")
+
+	cfg := NewConfig()
+	config.LoadConfig(cfg, "")
+
+	require.NotNil(t, cfg.Public.Server.TLS)
+	require.True(t, cfg.Public.Server.TLS.Enabled)
+	require.Equal(t, "/etc/tls/server.crt", cfg.Public.Server.TLS.Cert)
+	require.Equal(t, "/etc/tls/server.key", cfg.Public.Server.TLS.Key)
+}
+
 func TestConfig_GetName(t *testing.T) {
 	cfg := NewConfig()
 	require.Equal(t, "nitro-enclave-signer", cfg.GetName())

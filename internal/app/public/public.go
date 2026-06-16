@@ -15,6 +15,8 @@
 package public
 
 import (
+	"fmt"
+
 	"github.com/circlefin/arc-remote-signer/internal/common/config"
 	grpcServer "github.com/circlefin/arc-remote-signer/internal/common/grpc/server"
 	"github.com/circlefin/arc-remote-signer/internal/common/lifecycle"
@@ -29,22 +31,46 @@ type CreateServerParams struct {
 	Env         config.Environment
 	APIStatsSvc metric.APIStatsService
 	SignerSvc   pb.SignerServiceServer
+	// Prometheus, when set, installs the gRPC server metrics interceptor and
+	// pre-initializes per-method metrics. It is nil when metrics are disabled.
+	Prometheus *metric.Prometheus
 }
 
 // New creates a new public server that implements lifecycle.Runnable for the app service.
 func New(cfg *grpcServer.Config, params CreateServerParams) (lifecycle.Runnable, error) {
-	grpcSrv := grpcServer.NewServer(grpcServer.RequiredEngineParams{
+	opts, err := grpcServer.WithTLS(cfg.TLS)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load TLS options: %w", err)
+	}
+
+	engineParams := grpcServer.RequiredEngineParams{
 		ServiceName:     params.ServiceName,
 		Env:             params.Env,
 		APIStatsService: params.APIStatsSvc,
-	})
+	}
+	if params.Prometheus != nil {
+		engineParams.UnaryInterceptors = append(engineParams.UnaryInterceptors, params.Prometheus.UnaryServerInterceptor())
+	}
+
+	grpcSrv := grpcServer.NewServer(engineParams, opts...)
 	reflection.Register(grpcSrv)
 	pb.RegisterSignerServiceServer(grpcSrv, params.SignerSvc)
 
-	return grpcServer.NewRunnable(
+	runnable, err := grpcServer.NewRunnable(
 		params.ServiceName,
 		grpcSrv,
 		grpcServer.WithListener(grpcServer.ListenerTransportTCP, cfg.Host, uint32(cfg.Port)),
 		grpcServer.WithHealthServer(pb.SignerService_ServiceDesc.ServiceName),
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Pre-seed metrics after all services are registered — WithHealthServer adds
+	// grpc.health.v1 inside NewRunnable, so doing this earlier would miss its RPCs.
+	if params.Prometheus != nil {
+		params.Prometheus.InitializeMetrics(grpcSrv)
+	}
+
+	return runnable, nil
 }

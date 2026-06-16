@@ -233,14 +233,20 @@ The `signer-with-enclave` target bundles a real Enclave Image File (EIF). Buildi
 
 1. Install `nitro-cli` by following the official AWS guide: https://docs.aws.amazon.com/enclaves/latest/user/nitro-enclave-cli-install.html
 
-2. Run the end-to-end build:
+2. Create a `docker-container` builder. The enclave bake target uses `rewrite-timestamp=true` for reproducible builds, which requires the `docker-container` driver (BuildKit >= 0.13.0):
+
+   ```bash
+   docker buildx create --name enclave-builder --driver docker-container --use
+   ```
+
+3. Run the end-to-end build:
 
    ```bash
    # 1. Build the linux/amd64 host binary
    APP_ENV=qa make build
 
    # 2. Build the enclave Docker image
-   docker buildx bake enclave
+   docker buildx bake --provenance=false --allow fs.read=./docker/certs enclave
 
    # 3. Package the Docker image into an EIF
    nitro-cli build-enclave \
@@ -253,18 +259,156 @@ The `signer-with-enclave` target bundles a real Enclave Image File (EIF). Buildi
      signer-with-enclave
    ```
 
-The resulting EIF is unsigned, which is fine for local builds. Production builds pass `--signing-certificate` and `--private-key` (via AWS KMS) to `nitro-cli build-enclave` so the EIF carries a PCR8 measurement that can be enforced in KMS key policies.
+> [!NOTE]
+> Different versions of `nitro-cli` bundle different kernel and init ramdisk images into the EIF, which changes the PCR0 and PCR2 measurements even when the application code is identical. Pin `nitro-cli` to a specific version and coordinate upgrades with downstream KMS key policy updates.
 
 ### AWS Prerequisites
 
-To deploy this service in production, you need:
+Before deploying, provision the following AWS resources in the account that will run the signer. All snippets below use placeholder values (account ID `000000000000`, region `us-east-1`, etc.) — replace them with your own before applying.
 
-- EC2 instance with Nitro Enclaves enabled (for example: `m5.xlarge`, `c5.xlarge`)
-- IAM role with permissions for:
-  - AWS KMS: `kms:Decrypt`, `kms:GenerateDataKey`
-  - AWS Secrets Manager: `secretsmanager:GetSecretValue`, `secretsmanager:PutSecretValue`
-- VPC configuration with appropriate security groups
-- Enclave resources allocated (memory, vCPUs)
+#### EC2 host
+
+- Nitro Enclaves enabled instance (for example: `m5.xlarge`, `c5.xlarge`)
+- VPC configuration with security groups that allow inbound traffic from the validator node to the signer's gRPC port
+- Enclave resources allocated via `/etc/nitro_enclaves/allocator.yaml` (memory, vCPUs sized for your workload)
+- `nitro-cli` installed on the deployment host (needed to run the enclave image). If you are building the EIF on a separate machine, install `nitro-cli` there too — but the deployment host only needs it at runtime:
+  - **Amazon Linux 2:** install and configure:
+    ```bash
+    sudo amazon-linux-extras enable aws-nitro-enclaves-cli
+    sudo yum install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel
+    sudo usermod -aG ne $USER && sudo usermod -aG docker $USER
+    sudo systemctl enable --now nitro-enclaves-allocator.service
+    sudo systemctl enable --now docker
+    ```
+  - **Amazon Linux 2023:** install and configure:
+    ```bash
+    sudo dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel
+    sudo usermod -aG ne $USER && sudo usermod -aG docker $USER
+    sudo systemctl enable --now nitro-enclaves-allocator.service
+    sudo systemctl enable --now docker
+    ```
+  - **Other distros (Ubuntu, Debian, …):** build from source from [aws/aws-nitro-enclaves-cli](https://github.com/aws/aws-nitro-enclaves-cli)
+  - Full install guide: [Install the Nitro Enclaves CLI](https://docs.aws.amazon.com/enclaves/latest/user/nitro-enclave-cli-install.html)
+
+#### AWS KMS key
+
+The signer uses **envelope encryption**: a symmetric KMS key wraps a per-validator data key, which in turn encrypts the validator's private key stored in Secrets Manager.
+
+- Create a **symmetric** key with key spec `SYMMETRIC_DEFAULT`. **Asymmetric / RSA keys are not supported.**
+- A **multi-region** key is recommended — `APP_PROVIDER_AWSKMS_ARNS` accepts multiple ARNs and the signer fails over across them.
+- The **key policy** must include an attestation-based condition so that only your enclave can call `Decrypt` / `GenerateDataKey` with the `Recipient` parameter. Use the PCR0 hash printed by `nitro-cli build-enclave` (the enclave image is built reproducibly — see [Reproducible Enclave Builds](../README.md#reproducible-enclave-builds) — so this hash is stable across rebuilds of the same source).
+  - Enforce `kms:RecipientAttestation:ImageSha384` (PCR0 — the enclave image hash). The enclave image is built reproducibly, so this hash is stable across rebuilds of the same source with the same `nitro-cli` version.
+
+> **Example only — replace `000000000000` with your account ID, `arn:aws:iam::000000000000:role/arc-signer-host` with the IAM role attached to the signer's EC2 instance, and the placeholder PCR values with the actual values from your enclave build.**
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EnableRootAccountAdministration",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::000000000000:root" },
+      "Action": "kms:*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowEnclaveDecryptAndGenerateDataKey",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::000000000000:role/arc-signer-host" },
+      "Action": [
+        "kms:Decrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEqualsIgnoreCase": {
+          "kms:RecipientAttestation:ImageSha384": "EXAMPLE_PCR0_REPLACE_WITH_VALUE_FROM_NITRO_CLI_BUILD_OUTPUT"
+        }
+      }
+    }
+  ]
+}
+```
+
+Reference: [Using cryptographic attestation with AWS KMS](https://docs.aws.amazon.com/enclaves/latest/user/kms.html).
+
+> **Note:** The attestation condition lives in the **KMS key policy** above — it is not required in the EC2 IAM role policy. The IAM role grants the host permission to call KMS; the key policy then enforces that only requests carrying a valid enclave attestation are honoured.
+
+#### AWS Secrets Manager secret
+
+Pre-create **one empty secret per validator**. The signer writes the wrapped validator key into it on the first run; on subsequent runs it reads the wrapped key back.
+
+- **Secret type: Plaintext** (not key/value). The signer stores the wrapped key as a base64-encoded string in `SecretString`. Leave the initial value empty — the signer populates it on first run.
+
+Recommended naming convention: `arc-chain/{env}/validator-{n}/key`.
+
+> **Example only — replace the secret name and region with your own.**
+
+```bash
+aws secretsmanager create-secret \
+  --name "arc-chain/dev/validator-1/key" \
+  --description "Wrapped Arc validator signing key" \
+  --region us-east-1
+```
+
+> **Note:** Create the secret using the CLI, not the AWS console. The signer treats any non-empty `SecretString` as an existing wrapped key and tries to base64-decode it on startup. The AWS console pre-fills the value with `{"":""}`, which is not empty and will cause startup to fail with `illegal base64 data`.
+
+You will pass this name (or its full ARN) to the signer via `APP_SERVICE_SIGNER_KEYID`. On first run, if the secret has no stored value, the signer generates a new key and writes it automatically — no manual initialization needed.
+
+#### IAM role on the EC2 host
+
+Attach an instance profile / role to the signer's EC2 host with the four permissions below, scoped to the specific KMS key ARN and secret ARN you just created — not `*`.
+
+> **Example only (single-region minimum) — replace `000000000000`, the KMS key ID, and the secret name with your own values.**
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "KMSEnvelopeOps",
+      "Effect": "Allow",
+      "Action": [
+        "kms:GenerateDataKey",
+        "kms:Decrypt"
+      ],
+      "Resource": "arn:aws:kms:us-east-1:000000000000:key/EXAMPLE-KEY-ID-1234-5678"
+    },
+    {
+      "Sid": "SecretsManagerValidatorKey",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:PutSecretValue"
+      ],
+      "Resource": "arn:aws:secretsmanager:us-east-1:000000000000:secret:arc-chain/dev/validator-1/key-*"
+    }
+  ]
+}
+```
+
+The trailing `-*` on the secret ARN is required because Secrets Manager appends a random 6-character suffix to each secret's full ARN.
+
+**Multi-region keys:** if you created a multi-region KMS key and replicated it to additional regions, add one `Resource` ARN per replica to the `KMSEnvelopeOps` statement. For example:
+
+```json
+"Resource": [
+  "arn:aws:kms:us-east-1:000000000000:key/mrk-EXAMPLE-KEY-ID-1234-5678",
+  "arn:aws:kms:us-west-2:000000000000:key/mrk-EXAMPLE-KEY-ID-1234-5678"
+]
+```
+
+Each replica key also requires its own key policy with the attestation condition (the PCR0 value is the same across regions for the same EIF).
+
+#### Wiring it up
+
+Once the resources above exist, point the signer at them by setting:
+
+- `APP_PROVIDER_AWSKMS_ARNS` — the KMS key ARN (or comma-separated list for multi-region)
+- `APP_SERVICE_SIGNER_KEYID` — the Secrets Manager secret name or ARN
+
+See [Configuration](#configuration) below for the full environment variable reference.
 
 ### Configuration
 
@@ -278,9 +422,14 @@ All environment variables use the `APP_` prefix. Nested keys use underscore styl
 
 ```bash
 # Required - AWS configuration
+# APP_PROVIDER_SECRETS_LOCALSTACK_REGION overrides the AWS region for Secrets Manager.
+# On EC2, the SDK resolves region from instance metadata automatically — only set this if
+# the SDK cannot detect the region (e.g. running outside EC2 or with --network bridge).
+# In production, prefer the standard AWS_REGION env var instead.
 export APP_PROVIDER_SECRETS_LOCALSTACK_REGION=us-east-1
-export APP_PROVIDER_AWSKMS_ARNS=arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab
-export APP_SERVICE_SIGNER_KEYID=your-secret-id
+export APP_PROVIDER_AWSKMS_ARNS=arn:aws:kms:us-east-1:000000000000:key/EXAMPLE-KEY-ID-1234-5678
+# APP_SERVICE_SIGNER_KEYID accepts either the secret name or its full ARN.
+export APP_SERVICE_SIGNER_KEYID=arc-chain/dev/validator-1/key
 
 # Enclave configuration
 export APP_PROVIDER_ENCLAVE_NITROENCLAVE_ENABLED=true
@@ -296,6 +445,12 @@ export APP_OTLP_ENDPOINT=localhost:4317
 export DD_AGENT_HOST=localhost
 export DD_SERVICE=arc-signer
 export DD_ENV=prod
+
+# Prometheus metrics (optional, disabled by default)
+export APP_METRICS_PROMETHEUS_ENABLED=true
+export APP_METRICS_PROMETHEUS_HOST=0.0.0.0
+export APP_METRICS_PROMETHEUS_PORT=9090
+export APP_METRICS_PROMETHEUS_PATH=/metrics
 ```
 
 Example config file (`configs/app.yaml`):
@@ -303,17 +458,56 @@ Example config file (`configs/app.yaml`):
 ```yaml
 provider:
   awskms:
-    arns: arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab
+    arns: arn:aws:kms:us-east-1:000000000000:key/EXAMPLE-KEY-ID-1234-5678
   secrets:
     localstack:
       region: us-east-1
 
 service:
   signer:
-    keyId: prod/arc/validator/key1
+    keyId: arc-chain/dev/validator-1/key
 ```
 
 Environment variables override config file values.
+
+### Metrics
+
+The signer exposes two complementary metric paths:
+
+- **Datadog (statsd)** — API latency metrics, always initialized (see `metrics.statsd`).
+- **Prometheus** — a scrape endpoint that surfaces gRPC server and runtime metrics. **Disabled by default**; enable via the `metrics.prometheus` block:
+
+```yaml
+metrics:
+  prometheus:
+    enabled: true
+    host: 0.0.0.0
+    port: 9090
+    path: /metrics
+```
+
+Prometheus instrumentation is centralized in a [go-grpc-middleware](https://github.com/grpc-ecosystem/go-grpc-middleware) unary server interceptor on the public gRPC server — there are no hand-written per-handler counters. When enabled, the service serves the registry over HTTP at `host:port` + `path` (default `0.0.0.0:9090/metrics`).
+
+Exposed series:
+
+| Metric | Type | Notable labels |
+| --- | --- | --- |
+| `grpc_server_handled_total` | counter | `grpc_method`, `grpc_code`, `grpc_service`, `grpc_type` |
+| `grpc_server_started_total` | counter | `grpc_method`, `grpc_service`, `grpc_type` |
+| `grpc_server_handling_seconds` | histogram | `grpc_method`, `grpc_service`, `grpc_type` |
+| `grpc_server_msg_received_total` / `grpc_server_msg_sent_total` | counter | `grpc_method`, `grpc_service`, `grpc_type` |
+| `go_*` (e.g. `go_goroutines`) | gauge/counter | Go runtime collector |
+| `process_*` (e.g. `process_resident_memory_bytes`) | gauge/counter | process collector |
+
+All gRPC method/code combinations are pre-seeded to `0` at startup (`InitializeMetrics`), so counters appear before the first request. Example scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: arc-remote-signer
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['<signer-host>:9090']
+```
 
 ### Production Deployment Notes
 

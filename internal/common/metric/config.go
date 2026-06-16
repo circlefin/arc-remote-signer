@@ -15,11 +15,16 @@ package metric
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	ddstatsd "github.com/DataDog/datadog-go/v5/statsd"
 )
+
+// defaultPrometheusPath is the HTTP path served when none is configured.
+const defaultPrometheusPath = "/metrics"
 
 // DatadogStatsdConfig defines connection and tagging options for the Datadog
 // statsd client.
@@ -31,9 +36,18 @@ type DatadogStatsdConfig struct {
 	GlobalTags        []string `mapstructure:"globalTags"`
 }
 
+// PrometheusConfig defines the Prometheus metrics HTTP endpoint configuration.
+type PrometheusConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Host    string `mapstructure:"host"`
+	Port    int    `mapstructure:"port"`
+	Path    string `mapstructure:"path"`
+}
+
 // Config is the root metric configuration consumed by application bootstrap.
 type Config struct {
-	Statsd *DatadogStatsdConfig `mapstructure:"statsd"`
+	Statsd     *DatadogStatsdConfig `mapstructure:"statsd"`
+	Prometheus *PrometheusConfig    `mapstructure:"prometheus"`
 }
 
 // NewConfig returns the default metric configuration used by this service.
@@ -60,7 +74,33 @@ func NewConfig() *Config {
 			TelemetryDisabled: false,
 			GlobalTags:        globalTags,
 		},
+		// Initialized so APP_METRICS_PROMETHEUS_* env overrides bind even when the
+		// config file omits the prometheus block. Disabled by default.
+		Prometheus: &PrometheusConfig{
+			Enabled: false,
+			Host:    "0.0.0.0",
+			Port:    9090,
+			Path:    defaultPrometheusPath,
+		},
 	}
+}
+
+// IsPrometheusEnabled reports whether the Prometheus metrics endpoint is enabled.
+func (cfg *Config) IsPrometheusEnabled() bool {
+	return cfg.Prometheus != nil && cfg.Prometheus.Enabled
+}
+
+// GetAddr returns the host:port the Prometheus metrics server listens on.
+func (cfg *PrometheusConfig) GetAddr() string {
+	return net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+}
+
+// GetPath returns the configured metrics HTTP path, defaulting to /metrics.
+func (cfg *PrometheusConfig) GetPath() string {
+	if cfg.Path == "" {
+		return defaultPrometheusPath
+	}
+	return cfg.Path
 }
 
 // GetAddr returns the statsd destination in host:port or unix socket format.

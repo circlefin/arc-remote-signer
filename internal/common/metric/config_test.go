@@ -54,3 +54,46 @@ func TestStatsdConfig_UnixAddrHost(t *testing.T) {
 	cfg.Statsd.Host = "unix://foo"
 	require.Equal(t, "unix://foo", cfg.Statsd.GetAddr())
 }
+
+func TestNewConfig_PrometheusDefaults(t *testing.T) {
+	cfg := NewConfig()
+	require.NotNil(t, cfg.Prometheus)
+	require.False(t, cfg.Prometheus.Enabled)
+	require.Equal(t, "0.0.0.0", cfg.Prometheus.Host)
+	require.Equal(t, 9090, cfg.Prometheus.Port)
+	require.Equal(t, "/metrics", cfg.Prometheus.Path)
+}
+
+func TestConfig_IsPrometheusEnabled(t *testing.T) {
+	tests := map[string]struct {
+		prometheus *PrometheusConfig
+		want       bool
+	}{
+		"nil config": {prometheus: nil, want: false},
+		"disabled":   {prometheus: &PrometheusConfig{Enabled: false}, want: false},
+		"enabled":    {prometheus: &PrometheusConfig{Enabled: true}, want: true},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := &Config{Prometheus: tt.prometheus}
+			require.Equal(t, tt.want, cfg.IsPrometheusEnabled())
+		})
+	}
+}
+
+func TestPrometheusConfig_GetAddr(t *testing.T) {
+	cfg := &PrometheusConfig{Host: "0.0.0.0", Port: 9090}
+	require.Equal(t, "0.0.0.0:9090", cfg.GetAddr())
+}
+
+func TestPrometheusConfig_GetPath(t *testing.T) {
+	t.Run("returns configured path", func(t *testing.T) {
+		cfg := &PrometheusConfig{Path: "/custom"}
+		require.Equal(t, "/custom", cfg.GetPath())
+	})
+
+	t.Run("defaults when empty", func(t *testing.T) {
+		cfg := &PrometheusConfig{Path: ""}
+		require.Equal(t, "/metrics", cfg.GetPath())
+	})
+}

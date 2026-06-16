@@ -21,7 +21,7 @@ Deployed as a 1-to-1 sidecar alongside Arc Chain validator nodes, Arc Remote Sig
 - 📜 **Cryptographic attestation** - Verifiable proof of enclave execution for validator operations
 - 🔄 **Envelope encryption** - Four-layer key protection (validator key → data key → KMS key → enclave key)
 - 🚀 **High-performance gRPC** - Efficient binary protocol for low-latency validator signing
-- 📊 **Full observability** - OpenTelemetry tracing and Datadog metrics
+- 📊 **Full observability** - OpenTelemetry tracing, Datadog metrics, and an optional Prometheus endpoint
 - 🏗️ **Sidecar architecture** - 1-to-1 deployment alongside Arc Chain validator nodes
 - ✅ **Comprehensive testing** - Unit, integration, and smoke test coverage
 
