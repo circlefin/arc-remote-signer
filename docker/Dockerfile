@@ -1,13 +1,36 @@
+ARG GO_IMAGE=golang:1.25@sha256:00feed335fe561979f2cdcc30a5191231977c5631fe79c40f7d3ab63b4fa222f
 ARG RUST_IMAGE=rust:1.95-bookworm@sha256:adab7941580c74513aa3347f2d2a1f975498280743d29ec62978ba12e3540d3a
-ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252
+ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716
 ARG NITRO_CLI_VERSION=v1.4.4
 # SHA256 of the source tarball for ${NITRO_CLI_VERSION}. Verified at build
 # time so a retagged upstream cannot silently change the binary we ship.
 ARG NITRO_CLI_SHA256=5f8182119496a07403b755e1c7e62780acc71ba136639226cdbb508482836e01
 
+### Build the application binary.
+FROM ${GO_IMAGE} AS app-builder
+
+ARG TARGETARCH
+
+RUN --mount=type=bind,from=certs,target=/usr/local/share/ca-certificates/ \
+    update-ca-certificates && \
+    go install github.com/bufbuild/buf/cmd/buf@v1.50.0 && \
+    go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6 && \
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+WORKDIR /src/proto
+RUN buf generate
+WORKDIR /src
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
+    go build -o /out/app .
+
 ### Build grpc-health-probe from master (404552c) to get grpc v1.79.3 (CVE-2026-33186 fix).
 ### TODO: Revert to `COPY --from=ghcr.io/grpc-ecosystem/grpc-health-probe:<tag>` once a tagged release includes grpc >= v1.79.3.
-FROM golang:1.25 AS grpc-health-probe-builder
+FROM ${GO_IMAGE} AS grpc-health-probe-builder
 
 RUN --mount=type=bind,from=certs,target=/usr/local/share/ca-certificates/ \
     update-ca-certificates && \
@@ -43,7 +66,7 @@ ARG TARGETARCH
 
 WORKDIR /usr/local/circle
 
-COPY --chmod=0750 bin/$TARGETARCH/app ./app
+COPY --from=app-builder --chmod=0750 /out/app ./app
 COPY configs ./configs
 COPY deployments ./deployments
 
