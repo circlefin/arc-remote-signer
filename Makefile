@@ -15,7 +15,7 @@ proto: ## Generate protocol buffers
 build: proto ## Build application binary
 	@$(SCRIPTS)/build.sh
 
-local-enclave-docker: build ## Build local enclave docker image
+local-enclave-docker: ## Build local enclave docker image
 	@docker buildx bake --set "*.tags=$(ENCLAVE_NAME):local" signer
 
 #------------------------------------------------------------------------------
@@ -25,7 +25,7 @@ local-enclave-docker: build ## Build local enclave docker image
 test: build ## Run unit tests and linting
 	@$(SCRIPTS)/test.sh
 
-test-it: up ## Run integration tests
+test-it: build up ## Run integration tests
 	@RUN_IT_TESTS=true $(SCRIPTS)/test.sh
 
 test-all: test-it smoke ## Run all tests
@@ -40,7 +40,7 @@ test-reproducibility: ## Verify enclave build reproducibility
 # Development
 #------------------------------------------------------------------------------
 
-dev: up ## Start local development
+dev: build up ## Start local development
 	@$(SCRIPTS)/dev.sh
 
 up: local-enclave-docker ## Start dependencies

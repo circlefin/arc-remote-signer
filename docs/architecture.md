@@ -215,17 +215,13 @@ The project uses `docker buildx bake` (configured in `docker-bake.hcl`) to build
 
 #### Local `signer` image (macOS or Linux)
 
-A single `make` target builds the Go binary and the host-arch Docker image for the `signer` target — recommended for local development against a mock enclave (no `nitro-cli` or EIF needed):
+A single `make` target builds the Docker image for the `signer` target — recommended for local development against a mock enclave (no `nitro-cli` or EIF needed):
 
 ```bash
-# macOS (Apple Silicon → arm64 image)
 make local-enclave-docker
-
-# Linux or when you need a linux/amd64 image
-APP_ENV=qa make local-enclave-docker
 ```
 
-`APP_ENV=qa` is the toggle that switches `scripts/build.sh` into cross-compiling `linux/amd64` so Docker's `COPY bin/$TARGETARCH/app` resolves correctly.
+The Dockerfile includes a multi-stage Go build (`app-builder`), so no pre-compiled binary is needed — `docker buildx bake` handles everything.
 
 #### Production image with bundled enclave (`signer-with-enclave`)
 
@@ -242,18 +238,15 @@ The `signer-with-enclave` target bundles a real Enclave Image File (EIF). Buildi
 3. Run the end-to-end build:
 
    ```bash
-   # 1. Build the linux/amd64 host binary
-   APP_ENV=qa make build
-
-   # 2. Build the enclave Docker image
+   # 1. Build the enclave Docker image
    docker buildx bake --provenance=false --allow fs.read=./docker/certs enclave
 
-   # 3. Package the Docker image into an EIF
+   # 2. Package the Docker image into an EIF
    nitro-cli build-enclave \
      --docker-uri nitro-enclave-signer/enclave:latest \
      --output-file enclave.eif
 
-   # 4. Bundle the EIF into the final signer-with-enclave image
+   # 3. Bundle the EIF into the final signer-with-enclave image
    docker buildx bake \
      --set "signer-with-enclave.args.ENCLAVE_EIF=./enclave.eif" \
      signer-with-enclave

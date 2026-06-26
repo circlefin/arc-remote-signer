@@ -1,0 +1,130 @@
+name: Nitro Enclave Build
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: "Runner label for the build job."
+        type: string
+        default: "ubuntu-latest"
+      artifact_name:
+        description: "Name for the uploaded EIF artifact."
+        type: string
+        default: "nitro-enclave-image"
+      retention_days:
+        description: "Artifact retention in days."
+        type: number
+        default: 1
+      cli_commit:
+        description: >-
+          Commit SHA of aws-nitro-enclaves-cli to build from.
+          WARNING: changing this value can alter PCR0 and PCR2 measurements
+          because nitro-cli controls the kernel and init ramdisk bundled
+          into the EIF. Coordinate with downstream attestation policies.
+        type: string
+        default: "18a5f6f35f110c0f235f193ae3caff9434d64ee1" # v1.4.5
+    outputs:
+      image_artifact_name:
+        description: "Name of the artifact containing the EIF."
+        value: ${{ jobs.build.outputs.image_artifact_name }}
+      output_file:
+        description: "Path to the EIF file within the artifact."
+        value: ${{ jobs.build.outputs.output_file }}
+      pcr0:
+        description: "PCR0 measurement (enclave image hash)."
+        value: ${{ jobs.build.outputs.pcr0 }}
+      pcr1:
+        description: "PCR1 measurement (Linux kernel hash)."
+        value: ${{ jobs.build.outputs.pcr1 }}
+      pcr2:
+        description: "PCR2 measurement (application hash)."
+        value: ${{ jobs.build.outputs.pcr2 }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    outputs:
+      image_artifact_name: ${{ steps.eif.outputs.image_artifact_name }}
+      output_file: ${{ steps.eif.outputs.output_file }}
+      pcr0: ${{ steps.eif.outputs.pcr0 }}
+      pcr1: ${{ steps.eif.outputs.pcr1 }}
+      pcr2: ${{ steps.eif.outputs.pcr2 }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build enclave image
+        run: docker buildx bake --provenance=false --allow fs.read=./docker/certs enclave
+
+      - name: Restore nitro-cli from cache
+        id: cli-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /tmp/nitro-install
+          key: nitro-cli-${{ inputs.cli_commit }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install Rust toolchain
+        if: steps.cli-cache.outputs.cache-hit != 'true'
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1
+        with:
+          toolchain: stable
+
+      - name: Build nitro-cli from source
+        if: steps.cli-cache.outputs.cache-hit != 'true'
+        env:
+          COMMIT: ${{ inputs.cli_commit }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            curl tar build-essential clang gcc \
+            libssl-dev pkg-config musl-tools
+
+          mkdir -p /tmp/nitro-src
+          curl -sSfL "https://github.com/aws/aws-nitro-enclaves-cli/archive/${COMMIT}.tar.gz" | \
+            tar -C /tmp/nitro-src -xz --strip-components=1
+
+          cd /tmp/nitro-src
+          make vsock-proxy-native nitro-cli-native
+          mkdir -p /tmp/nitro-install
+          NITRO_CLI_INSTALL_DIR=/tmp/nitro-install make install-tools
+
+      - name: Install nitro-cli
+        run: sudo cp -a /tmp/nitro-install/. /
+
+      - name: Build EIF
+        id: eif
+        run: |
+          sudo mkdir -p /var/log/nitro_enclaves
+          sudo chmod 777 /var/log/nitro_enclaves
+
+          nitro-cli build-enclave \
+            --docker-uri nitro-enclave-signer/enclave:latest \
+            --output-file enclave.eif
+
+          nitro-cli describe-eif \
+            --eif-path enclave.eif \
+            > describe_eif.json
+
+          echo "image_artifact_name=${{ inputs.artifact_name }}" >> "$GITHUB_OUTPUT"
+          echo "output_file=enclave.eif" >> "$GITHUB_OUTPUT"
+          pcr0=$(jq -er '.Measurements.PCR0' describe_eif.json)
+          pcr1=$(jq -er '.Measurements.PCR1' describe_eif.json)
+          pcr2=$(jq -er '.Measurements.PCR2' describe_eif.json)
+          echo "pcr0=${pcr0}" >> "$GITHUB_OUTPUT"
+          echo "pcr1=${pcr1}" >> "$GITHUB_OUTPUT"
+          echo "pcr2=${pcr2}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload EIF and metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          retention-days: ${{ inputs.retention_days }}
+          path: |
+            enclave.eif
+            describe_eif.json
