@@ -229,11 +229,11 @@ func TestRecoveryWithLogger(t *testing.T) {
 					if tc.expectCode == codes.Unavailable {
 						assert.Contains(t, st.Message(), "connection closed")
 					} else {
-						assert.Contains(t, st.Message(), "something went wrong")
+						assert.Equal(t, "something went wrong", st.Message())
 
-						// Check panic value in error message if it's a string
+						// Verify that the error message does not leak the raw panic details/value
 						if panicStr, ok := tc.panicValue.(string); ok {
-							assert.Contains(t, st.Message(), panicStr)
+							assert.NotContains(t, st.Message(), panicStr)
 						}
 					}
 				}
