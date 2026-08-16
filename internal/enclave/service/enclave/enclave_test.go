@@ -184,6 +184,15 @@ func (s *EnclaveServiceTestSuite) TestGetPublicKey_ResolveSecretKeyError() {
 	s.ErrorContains(err, "failed to cache data key")
 }
 
+func (s *EnclaveServiceTestSuite) TestGetPublicKey_NilRequest() {
+	resp, err := s.service.GetPublicKey(context.Background(), nil)
+
+	s.Nil(resp)
+	s.Error(err)
+	s.Equal(codes.InvalidArgument, status.Code(err))
+	s.Contains(err.Error(), "request is nil")
+}
+
 func (s *EnclaveServiceTestSuite) TestGetPublicKey_NilEncryptedKeyMaterial() {
 	resp, err := s.service.GetPublicKey(context.Background(), &pb.GetPublicKeyRequest{
 		Algorithm:            pb.Algorithm_ALGORITHM_ED25519,
@@ -193,6 +202,15 @@ func (s *EnclaveServiceTestSuite) TestGetPublicKey_NilEncryptedKeyMaterial() {
 	s.Nil(resp)
 	s.Equal(codes.InvalidArgument, status.Code(err))
 	s.ErrorContains(err, "encrypted key material is nil")
+}
+
+func (s *EnclaveServiceTestSuite) TestSignMessage_NilRequest() {
+	resp, err := s.service.SignMessage(context.Background(), nil)
+
+	s.Nil(resp)
+	s.Error(err)
+	s.Equal(codes.InvalidArgument, status.Code(err))
+	s.Contains(err.Error(), "request is nil")
 }
 
 func (s *EnclaveServiceTestSuite) TestSignMessage_NilEncryptedKeyMaterial() {

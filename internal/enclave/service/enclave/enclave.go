@@ -111,6 +111,9 @@ func (s *Service) GenerateKey(_ context.Context, req *pb.GenerateKeyRequest) (*p
 
 // GetPublicKey derives the public key from encrypted key material.
 func (s *Service) GetPublicKey(ctx context.Context, req *pb.GetPublicKeyRequest) (*pb.GetPublicKeyResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is nil")
+	}
 	alg, err := toAlgorithm(req.Algorithm)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -133,6 +136,9 @@ func (s *Service) GetPublicKey(ctx context.Context, req *pb.GetPublicKeyRequest)
 
 // SignMessage signs the request message with the decrypted secret key.
 func (s *Service) SignMessage(ctx context.Context, req *pb.SignMessageRequest) (*pb.SignMessageResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is nil")
+	}
 	alg, err := toAlgorithm(req.Algorithm)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())

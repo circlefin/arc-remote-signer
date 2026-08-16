@@ -38,9 +38,14 @@ type Provider interface {
 	Update(ctx context.Context, secretID string, secret []byte) (string, error)
 }
 
+type secretsClient interface {
+	GetSecretValue(ctx context.Context, params *secretsmanager.GetSecretValueInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error)
+	PutSecretValue(ctx context.Context, params *secretsmanager.PutSecretValueInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.PutSecretValueOutput, error)
+}
+
 // ProviderImpl is the implementation of the secrets provider.
 type ProviderImpl struct {
-	secretClient *secretsmanager.Client
+	secretClient secretsClient
 }
 
 // New creates a new secrets provider.
@@ -61,7 +66,16 @@ func (p *ProviderImpl) Get(ctx context.Context, secretID string) (secret []byte,
 		}
 		return nil, status.Errorf(codes.Internal, "failed to get secret: %v", err)
 	}
-	return base64.StdEncoding.DecodeString(*resp.SecretString)
+	if resp == nil {
+		return nil, nil
+	}
+	if resp.SecretString != nil {
+		return base64.StdEncoding.DecodeString(*resp.SecretString)
+	}
+	if resp.SecretBinary != nil {
+		return resp.SecretBinary, nil
+	}
+	return nil, nil
 }
 
 // Update updates a secret in AWS Secrets Manager.
@@ -73,5 +87,8 @@ func (p *ProviderImpl) Update(ctx context.Context, secretID string, secret []byt
 	if err != nil {
 		return "", status.Errorf(codes.Internal, "failed to update secret: %v", err)
 	}
-	return *resp.ARN, nil
+	if resp != nil && resp.ARN != nil {
+		return *resp.ARN, nil
+	}
+	return "", nil
 }
