@@ -46,6 +46,7 @@ type SignerServiceTestSuite struct {
 	mockAWSKMSPvd  *awskms.MockProvider
 
 	initializedService       *Service
+	initializedNitroService  *Service
 	uninitializedService     *Service
 	testMessage              []byte
 	testPublicKey            []byte
@@ -88,6 +89,7 @@ func (s *SignerServiceTestSuite) SetupTest() {
 
 	s.setupUninitializedService()
 	s.setupInitializedService()
+	s.setupInitializedNitroService()
 }
 
 // TearDownTest runs after each test method.
@@ -197,6 +199,114 @@ func (s *SignerServiceTestSuite) TestSign() {
 			wantMessage:   "service is not initialized",
 			wantSignature: nil,
 			service:       s.uninitializedService,
+		},
+		{
+			name: "nitro enclave sign failure triggers attestation refresh and retries successfully",
+			request: &pb.SignRequest{
+				Message: s.testMessage,
+			},
+			mockSetup: func() {
+				hdr := header{
+					CipherKey:  s.testEncryptedKeyMaterial.EnclaveEncryptedDataKey,
+					CipherData: s.testEncryptedKeyMaterial.EncryptedPrivateKey,
+					Nonce:      s.testEncryptedKeyMaterial.Nonce,
+				}
+				headerBytes, err := hdr.MarshalBinary()
+				s.Require().NoError(err)
+
+				newAttestationDoc := []byte("new-attestation-doc")
+
+				// 1. Initial SignMessage fails (simulating stale attestation after enclave restart)
+				s.mockEnclavePvd.EXPECT().
+					SignMessage(gomock.Any(), &pb.SignMessageRequest{
+						Algorithm:            pb.Algorithm_ALGORITHM_ED25519,
+						EncryptedKeyMaterial: &s.testEncryptedKeyMaterial,
+						Message:              s.testMessage,
+					}).
+					Return(nil, status.Error(codes.Internal, "failed to decrypt data key")).
+					Times(1)
+
+				// 2. Refresh: GetAttestation from Enclave
+				s.mockEnclavePvd.EXPECT().
+					GetAttestation(gomock.Any(), &pb.GetAttestationRequest{}).
+					Return(&pb.GetAttestationResponse{
+						AttestationDocument: newAttestationDoc,
+					}, nil).
+					Times(1)
+
+				// 3. Refresh: Update KMS provider recipient
+				s.mockAWSKMSPvd.EXPECT().
+					SetAttestationDocument(newAttestationDoc).
+					Times(1)
+
+				// 4. Refresh: Get secret from secrets provider
+				s.mockSecretsPvd.EXPECT().
+					Get(gomock.Any(), testKeyID).
+					Return(headerBytes, nil).
+					Times(1)
+
+				// 5. Refresh: Decrypt data key from KMS with new recipient
+				s.mockAWSKMSPvd.EXPECT().
+					Decrypt(gomock.Any(), s.testEncryptedKeyMaterial.EnclaveEncryptedDataKey).
+					Return(nil, s.testEncryptedKeyMaterial.EnclaveEncryptedDataKey, nil).
+					Times(1)
+
+				// 6. Refresh: GetPublicKey from Enclave with new material
+				s.mockEnclavePvd.EXPECT().
+					GetPublicKey(gomock.Any(), &pb.GetPublicKeyRequest{
+						Algorithm:            pb.Algorithm_ALGORITHM_ED25519,
+						EncryptedKeyMaterial: &s.testEncryptedKeyMaterial,
+					}).
+					Return(&pb.GetPublicKeyResponse{
+						PublicKey: s.testPublicKey,
+					}, nil).
+					Times(1)
+
+				// 7. Retry: SignMessage succeeds
+				s.mockEnclavePvd.EXPECT().
+					SignMessage(gomock.Any(), &pb.SignMessageRequest{
+						Algorithm:            pb.Algorithm_ALGORITHM_ED25519,
+						EncryptedKeyMaterial: &s.testEncryptedKeyMaterial,
+						Message:              s.testMessage,
+					}).
+					Return(&pb.SignMessageResponse{
+						Signature: s.testSignature,
+					}, nil).
+					Times(1)
+			},
+			wantError:     false,
+			wantCode:      codes.OK,
+			wantMessage:   "",
+			wantSignature: s.testSignature,
+			service:       s.initializedNitroService,
+		},
+		{
+			name: "nitro enclave sign failure triggers attestation refresh which fails",
+			request: &pb.SignRequest{
+				Message: s.testMessage,
+			},
+			mockSetup: func() {
+				// 1. Initial SignMessage fails
+				s.mockEnclavePvd.EXPECT().
+					SignMessage(gomock.Any(), &pb.SignMessageRequest{
+						Algorithm:            pb.Algorithm_ALGORITHM_ED25519,
+						EncryptedKeyMaterial: &s.testEncryptedKeyMaterial,
+						Message:              s.testMessage,
+					}).
+					Return(nil, status.Error(codes.Internal, "failed to decrypt data key")).
+					Times(1)
+
+				// 2. Refresh fails at GetAttestation
+				s.mockEnclavePvd.EXPECT().
+					GetAttestation(gomock.Any(), &pb.GetAttestationRequest{}).
+					Return(nil, errors.New("enclave connection refused")).
+					Times(1)
+			},
+			wantError:     true,
+			wantCode:      codes.Internal,
+			wantMessage:   "failed to decrypt data key",
+			wantSignature: nil,
+			service:       s.initializedNitroService,
 		},
 	}
 
@@ -467,6 +577,7 @@ func (s *SignerServiceTestSuite) TestServiceInitialization() {
 
 func (s *SignerServiceTestSuite) setupUninitializedService() {
 	s.uninitializedService = &Service{
+		keyID:      testKeyID,
 		secretPvd:  s.mockSecretsPvd,
 		enclavePvd: s.mockEnclavePvd,
 		awskmsPvd:  s.mockAWSKMSPvd,
@@ -514,6 +625,47 @@ func (s *SignerServiceTestSuite) setupInitializedService() {
 	initializedService, err := New(context.Background(), false, cfg, s.mockSecretsPvd, s.mockEnclavePvd, s.mockAWSKMSPvd)
 	s.Require().NoError(err)
 	s.initializedService = initializedService
+}
+
+func (s *SignerServiceTestSuite) setupInitializedNitroService() {
+	s.mockSecretsPvd.EXPECT().
+		Get(gomock.Any(), testKeyID).
+		Return(nil, nil)
+
+	s.mockAWSKMSPvd.EXPECT().
+		GenerateDataKey(gomock.Any()).
+		Return(s.testEncryptedKeyMaterial.EnclaveEncryptedDataKey, s.testEncryptedKeyMaterial.EncryptedPrivateKey, s.testEncryptedKeyMaterial.EnclaveEncryptedDataKey, nil)
+
+	s.mockEnclavePvd.EXPECT().
+		GenerateKey(gomock.Any(), &pb.GenerateKeyRequest{
+			Algorithm:               pb.Algorithm_ALGORITHM_ED25519,
+			EnclaveEncryptedDataKey: s.testEncryptedKeyMaterial.EnclaveEncryptedDataKey,
+		}).
+		Return(&pb.GenerateKeyResponse{
+			EncryptedPrivateKey: s.testEncryptedKeyMaterial.EncryptedPrivateKey,
+			PublicKey:           s.testPublicKey,
+			Nonce:               s.testEncryptedKeyMaterial.Nonce,
+		}, nil)
+
+	hdr := header{
+		CipherKey:  s.testEncryptedKeyMaterial.EncryptedPrivateKey,
+		CipherData: s.testEncryptedKeyMaterial.EncryptedPrivateKey,
+		Nonce:      s.testEncryptedKeyMaterial.Nonce,
+	}
+
+	headerBytes, err := hdr.MarshalBinary()
+	if err != nil {
+		s.Require().NoError(err)
+	}
+
+	s.mockSecretsPvd.EXPECT().
+		Update(gomock.Any(), testKeyID, headerBytes).
+		Return(testSecretID, nil)
+
+	cfg := NewConfig()
+	initializedNitroService, err := New(context.Background(), true, cfg, s.mockSecretsPvd, s.mockEnclavePvd, s.mockAWSKMSPvd)
+	s.Require().NoError(err)
+	s.initializedNitroService = initializedNitroService
 }
 
 // Run the test suite.

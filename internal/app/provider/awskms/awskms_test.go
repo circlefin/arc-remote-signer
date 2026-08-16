@@ -158,3 +158,20 @@ func TestInitClients_InvalidArn(t *testing.T) {
 	require.ErrorContains(t, err, "invalid arn")
 	require.Nil(t, clients)
 }
+
+func TestSetAttestationDocument(t *testing.T) {
+	p := &provider{}
+
+	require.Nil(t, p.getRecipient())
+
+	doc := []byte("test-attestation-doc")
+	p.SetAttestationDocument(doc)
+
+	recipient := p.getRecipient()
+	require.NotNil(t, recipient)
+	require.Equal(t, doc, recipient.AttestationDocument)
+
+	// Setting empty doc should clear recipient
+	p.SetAttestationDocument(nil)
+	require.Nil(t, p.getRecipient())
+}
