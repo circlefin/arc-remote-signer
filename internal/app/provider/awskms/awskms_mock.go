@@ -66,3 +66,15 @@ func (mr *MockProviderMockRecorder) GenerateDataKey(ctx interface{}) *gomock.Cal
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GenerateDataKey", reflect.TypeOf((*MockProvider)(nil).GenerateDataKey), ctx)
 }
+
+// SetAttestationDocument mocks base method.
+func (m *MockProvider) SetAttestationDocument(attestationDocument []byte) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetAttestationDocument", attestationDocument)
+}
+
+// SetAttestationDocument indicates an expected call of SetAttestationDocument.
+func (mr *MockProviderMockRecorder) SetAttestationDocument(attestationDocument interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetAttestationDocument", reflect.TypeOf((*MockProvider)(nil).SetAttestationDocument), attestationDocument)
+}

@@ -54,11 +54,13 @@ const (
 type Service struct {
 	pb.UnimplementedSignerServiceServer
 	isNitroEnclaveEnabled bool
+	keyID                 string
 	secretPvd             secrets.Provider
 	enclavePvd            pb.EnclaveServiceClient
 	awskmsPvd             awskms.Provider
 	algorithm             pb.Algorithm
 	cache                 *cache
+	refreshMu             sync.Mutex
 }
 
 // New creates a new instance of the Signer gRPC server.
@@ -69,6 +71,7 @@ func New(ctx context.Context, isNitroEnclaveEnabled bool, keyCfg *Config, secret
 	}
 	service := &Service{
 		isNitroEnclaveEnabled: isNitroEnclaveEnabled,
+		keyID:                 keyCfg.KeyID,
 		secretPvd:             secretPvd,
 		enclavePvd:            enclavePvd,
 		awskmsPvd:             awskmsPvd,
@@ -222,6 +225,21 @@ func (s *Service) Sign(ctx context.Context, req *pb.SignRequest) (*pb.SignRespon
 		EncryptedKeyMaterial: cached.encryptedKeyMaterial,
 		Message:              req.Message,
 	})
+	if err != nil && s.isNitroEnclaveEnabled {
+		getLogger().WarnErr(ctx, "signing failed in nitro enclave mode, attempting attestation refresh and retry", err, nil)
+		if refreshErr := s.refreshKeyMaterial(ctx); refreshErr == nil {
+			cached = s.cache.get()
+			if cached != nil {
+				resp, err = s.enclavePvd.SignMessage(ctx, &pb.SignMessageRequest{
+					Algorithm:            s.algorithm,
+					EncryptedKeyMaterial: cached.encryptedKeyMaterial,
+					Message:              req.Message,
+				})
+			}
+		} else {
+			getLogger().WarnErr(ctx, "failed to refresh key material after sign error", refreshErr, nil)
+		}
+	}
 	if err != nil {
 		getLogger().ErrorErr(ctx, errSignMessage, err, nil)
 		// Preserve the original gRPC status code from the enclave
@@ -235,6 +253,40 @@ func (s *Service) Sign(ctx context.Context, req *pb.SignRequest) (*pb.SignRespon
 	return &pb.SignResponse{
 		Signature: resp.Signature,
 	}, nil
+}
+
+// refreshKeyMaterial re-fetches the attestation document from the enclave, updates the KMS provider recipient,
+// and re-encrypts the data key from the secret store. This ensures recovery after an Enclave-only restart.
+func (s *Service) refreshKeyMaterial(ctx context.Context) error {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+
+	if !s.isNitroEnclaveEnabled {
+		return nil
+	}
+
+	getLogger().Info(ctx, "refreshing enclave attestation and key material", nil)
+
+	// 1. Fetch fresh attestation document from Enclave
+	resp, err := s.enclavePvd.GetAttestation(ctx, &pb.GetAttestationRequest{})
+	if err != nil {
+		return fmt.Errorf("failed to get attestation document from enclave: %w", err)
+	}
+
+	// 2. Update KMS provider recipient with the fresh attestation
+	s.awskmsPvd.SetAttestationDocument(resp.AttestationDocument)
+
+	// 3. Re-read secret from secrets provider
+	secret, err := s.secretPvd.Get(ctx, s.keyID)
+	if err != nil {
+		return fmt.Errorf("failed to get secret during refresh: %w", err)
+	}
+	if len(secret) == 0 {
+		return fmt.Errorf("secret is empty during refresh")
+	}
+
+	// 4. Re-decrypt and re-cache key material
+	return s.loadKeyFromSecret(ctx, secret)
 }
 
 func prepareEncryptedKeyMaterial(isNitroEnclaveEnabled bool, encryptedPrivateKey, plainDataKey, enclaveEncryptedDataKey, nonce []byte) *pb.EncryptedKeyMaterial {

@@ -47,6 +47,7 @@ func getLogger() *logging.Logger {
 type Provider interface {
 	Decrypt(ctx context.Context, ciphertext []byte) (plaintext []byte, ciphertextForRecipient []byte, err error)
 	GenerateDataKey(ctx context.Context) (plainDataKey []byte, cipherDataKey []byte, ciphertextForRecipient []byte, err error)
+	SetAttestationDocument(attestationDocument []byte)
 }
 
 type client struct {
@@ -113,6 +114,26 @@ func (p *provider) call(fn func(*client) error) error {
 	return fmt.Errorf("all multi-region keys are invalid, error: %w", err)
 }
 
+func (p *provider) getRecipient() *types.RecipientInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.recipient
+}
+
+// SetAttestationDocument updates the recipient info with a new attestation document.
+func (p *provider) SetAttestationDocument(attestationDocument []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(attestationDocument) > 0 {
+		p.recipient = &types.RecipientInfo{
+			AttestationDocument:    attestationDocument,
+			KeyEncryptionAlgorithm: types.KeyEncryptionMechanismRsaesOaepSha256,
+		}
+	} else {
+		p.recipient = nil
+	}
+}
+
 // Decrypt will decrypt ciphertext with kms symmetry key and return the plaintext.
 // If the recipient is not nil, it will use the recipient to decrypt the ciphertext and return the ciphertext for recipient as well.
 func (p *provider) Decrypt(ctx context.Context, ciphertext []byte) (plaintext []byte, ciphertextForRecipient []byte, err error) {
@@ -120,11 +141,12 @@ func (p *provider) Decrypt(ctx context.Context, ciphertext []byte) (plaintext []
 		return nil, nil, errors.New("invalid ciphertext")
 	}
 	var res *kms.DecryptOutput
+	recipient := p.getRecipient()
 	err = p.call(func(client *client) error {
 		input := &kms.DecryptInput{
 			KeyId:          &client.arn,
 			CiphertextBlob: ciphertext,
-			Recipient:      p.recipient,
+			Recipient:      recipient,
 		}
 		res, err = client.Decrypt(ctx, input)
 		if err != nil {
@@ -143,11 +165,12 @@ func (p *provider) Decrypt(ctx context.Context, ciphertext []byte) (plaintext []
 // If the recipient is not nil, it will use the recipient to generate the data key and return the ciphertext for recipient as well.
 func (p *provider) GenerateDataKey(ctx context.Context) (plainDataKey, cipherDataKey, ciphertextForRecipient []byte, err error) {
 	var res *kms.GenerateDataKeyOutput
+	recipient := p.getRecipient()
 	err = p.call(func(client *client) error {
 		input := &kms.GenerateDataKeyInput{
 			KeyId:     &client.arn,
 			KeySpec:   types.DataKeySpecAes256,
-			Recipient: p.recipient,
+			Recipient: recipient,
 		}
 		res, err = client.GenerateDataKey(ctx, input)
 		if err != nil {
