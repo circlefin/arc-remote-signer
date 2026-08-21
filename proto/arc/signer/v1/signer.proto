@@ -15,6 +15,9 @@ service SignerService {
 message PublicKeyRequest {}
 message PublicKeyResponse {
   bytes public_key = 1;
+  // attestation_document binds public_key to the Nitro enclave. It is empty
+  // when Nitro mode is disabled.
+  bytes attestation_document = 2;
 }
 
 message SignRequest {

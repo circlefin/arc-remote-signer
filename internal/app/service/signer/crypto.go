@@ -16,14 +16,49 @@ package signer
 import (
 	"bytes"
 	"encoding/gob"
+
+	"github.com/circlefin/arc-remote-signer/proto/pb"
 )
 
 // header represents the AES encrypted data.
-// It contains the cipher key, cipher data, and nonce.
+// It contains the algorithm, cipher key, cipher data, and nonce.
+//
+// The stored-secret format is preserved across the KMS-in-enclave migration:
+// CipherKey/CipherData/Nonce map 1:1 onto the SecretEnvelope's
+// kms_encrypted_data_key/encrypted_private_key/nonce, so existing validator
+// secrets load without re-registration.
+//
+// Algorithm records the algorithm the key was generated under so a later reload
+// can fail cleanly on a config mismatch instead of silently signing under the
+// wrong one. It is gob-backward-compatible: secrets written before this field
+// decode as ALGORITHM_UNSPECIFIED.
 type header struct {
+	Algorithm  pb.Algorithm
 	CipherKey  []byte
 	CipherData []byte
 	Nonce      []byte
+}
+
+// toSecretEnvelope maps a stored header to the proto SecretEnvelope the
+// enclave decrypts in-enclave.
+func (h *header) toSecretEnvelope(alg pb.Algorithm) *pb.SecretEnvelope {
+	return &pb.SecretEnvelope{
+		Algorithm:           alg,
+		KmsEncryptedDataKey: h.CipherKey,
+		EncryptedPrivateKey: h.CipherData,
+		Nonce:               h.Nonce,
+	}
+}
+
+// headerFromSecretEnvelope maps an enclave-produced SecretEnvelope back to
+// the stored header format for persistence in Secrets Manager.
+func headerFromSecretEnvelope(env *pb.SecretEnvelope) *header {
+	return &header{
+		Algorithm:  env.GetAlgorithm(),
+		CipherKey:  env.GetKmsEncryptedDataKey(),
+		CipherData: env.GetEncryptedPrivateKey(),
+		Nonce:      env.GetNonce(),
+	}
 }
 
 // MarshalBinary marshals the header to binary format.

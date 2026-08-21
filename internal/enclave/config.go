@@ -15,8 +15,11 @@
 package enclave
 
 import (
+	"fmt"
+
 	"github.com/circlefin/arc-remote-signer/internal/common/config"
 	grpcServer "github.com/circlefin/arc-remote-signer/internal/common/grpc/server"
+	"github.com/circlefin/arc-remote-signer/internal/enclave/provider/awsproxy"
 )
 
 // Config should implement config.ApplicationConfig.
@@ -24,14 +27,15 @@ var _ config.ApplicationConfig = &Config{}
 
 // Config represents the complete enclave configuration.
 type Config struct {
-	// Base config
-	*config.BaseConfig `mapstructure:",squash"`
-
 	// Public provides configuration for the public gRPC server.
 	Public *PublicConfig `mapstructure:"public"`
 
 	// NitroEnclave contains config for the Nitro enclave.
-	NitroEnclave *NitroEnclaveConfig
+	NitroEnclave *NitroEnclaveConfig `mapstructure:"nitroEnclave"`
+
+	// Awsproxy contains config for the enclave-side AWS proxy that bridges
+	// loopback TCP to the parent (vsock in production, TCP in dev/CI).
+	Awsproxy *awsproxy.Config `mapstructure:"awsproxy"`
 }
 
 // PublicConfig wraps server configuration to match YAML structure.
@@ -43,7 +47,6 @@ type PublicConfig struct {
 // NewConfig creates a new config with sensible defaults.
 func NewConfig() *Config {
 	return &Config{
-		BaseConfig: config.NewBaseConfig(),
 		Public: &PublicConfig{
 			Server: &grpcServer.Config{
 				Host: "127.0.0.1",
@@ -51,8 +54,11 @@ func NewConfig() *Config {
 			},
 		},
 		NitroEnclave: &NitroEnclaveConfig{
-			Enabled: true,
+			Enabled:             true,
+			AwsproxyEndpoint:    fmt.Sprintf("http://127.0.0.1:%d", awsproxy.DefaultBasePort),
+			KmsConnectTimeoutMs: 3000,
 		},
+		Awsproxy: awsproxy.NewConfig(),
 	}
 }
 
@@ -61,17 +67,26 @@ func (c *Config) GetName() string {
 	return "nitro-enclave-signer-internal"
 }
 
-// IsProduction returns true if running in production.
-func (c *Config) IsProduction() bool {
-	return c.Env == config.Prod
-}
-
-// IsDevelopment returns true if running in development.
-func (c *Config) IsDevelopment() bool {
-	return c.Env == config.Dev
-}
-
 // NitroEnclaveConfig contains config for the Nitro enclave.
 type NitroEnclaveConfig struct {
-	Enabled bool
+	// Enabled controls whether Nitro Enclave features (NSM attestation, vsock) are active.
+	Enabled bool `mapstructure:"enabled"`
+	// AwsproxyEndpoint is the URL the in-enclave KMS client uses to
+	// reach AWS KMS. In both production and dev/CI it points at the
+	// enclave-side awsproxy loopback listener (default port 10316, see
+	// awsproxy.DefaultBasePort); the proxy then bridges onward — vsock to
+	// the parent (real KMS) in production, TCP to the standalone vsockproxy
+	// service (which forwards to LocalStack) in dev/CI. See
+	// deployments/docker-compose.yaml.
+	AwsproxyEndpoint string `mapstructure:"awsproxyEndpoint"`
+	// KmsConnectTimeoutMs is the per-request HTTP timeout in milliseconds
+	// applied to the in-enclave KMS client. Despite the "Connect" in the
+	// name (kept for parity with the host-side awskms.Config.ConnectTimeout
+	// field it threads into), it bounds the whole HTTP request — TCP
+	// dial, TLS handshake, request, and response — not just the connect
+	// phase. Combined with the SDK's default 3 retry attempts and the
+	// custom 300 ms MaxBackoff in awskms.go, worst-case total time per
+	// Initialize call is roughly 3*timeout + small backoff. Defaults to
+	// 3000 ms (3 s).
+	KmsConnectTimeoutMs int `mapstructure:"kmsConnectTimeoutMs"`
 }

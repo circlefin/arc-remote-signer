@@ -15,6 +15,7 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -139,16 +140,6 @@ test_field: "file-value"
 		assertLoadedConfig(t, cfg, Dev, "file-value")
 	})
 
-	t.Run("keeps initial values when config file does not exist", func(t *testing.T) {
-		t.Setenv("APP_ENV", "")
-		t.Setenv("APP_TEST_FIELD", "")
-
-		cfg := newTestAppConfig()
-		LoadConfig(cfg, "/tmp/non-existent-config.yaml")
-
-		assertLoadedConfig(t, cfg, Dev, "")
-	})
-
 	t.Run("keeps initial values when default config path has no config file", func(t *testing.T) {
 		t.Setenv("APP_ENV", "")
 		t.Setenv("APP_TEST_FIELD", "")
@@ -161,6 +152,29 @@ test_field: "file-value"
 
 		assertLoadedConfig(t, cfg, Dev, "")
 	})
+}
+
+func TestLoadConfig_ExitsWhenExplicitConfigFileMissing(t *testing.T) {
+	const (
+		helperEnv = "TEST_LOAD_CONFIG_FATAL"
+		pathEnv   = "TEST_LOAD_CONFIG_PATH"
+	)
+
+	if os.Getenv(helperEnv) == "1" {
+		LoadConfig(newTestAppConfig(), os.Getenv(pathEnv))
+		return
+	}
+
+	missingPath := filepath.Join(t.TempDir(), "missing.yaml")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLoadConfig_ExitsWhenExplicitConfigFileMissing$")
+	cmd.Env = append(os.Environ(), helperEnv+"=1", pathEnv+"="+missingPath)
+	output, err := cmd.CombinedOutput()
+
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	require.Equal(t, 1, exitErr.ExitCode())
+	require.Contains(t, string(output), "Specified config file could not be loaded:")
+	require.Contains(t, string(output), missingPath)
 }
 
 func newTestAppConfig() *testAppConfig {

@@ -22,8 +22,7 @@ const providerName = "enclave"
 // enclaveDefaultURL is the default dev URL for the enclave.
 const enclaveDefaultURL = "localhost:10350"
 
-// enclaveDefaultCID is the default CID for the enclave.
-// https://github.com/circlefin/arc-remote-signer/blob/master/docker/run.sh#L6
+// enclaveDefaultCID is the development default. The production policy pins it.
 const enclaveDefaultCID = 16
 
 // ProviderConfig contains configuration for the enclave gRPC provider.
@@ -35,7 +34,7 @@ type ProviderConfig struct {
 // NitroEnclave contains config for the Nitro Enclave.
 type NitroEnclave struct {
 	Enabled bool
-	// CID is the context ID of the enclave (typically 16 for first enclave).
+	// CID is the context ID of the enclave.
 	CID uint32
 	// Port is the VSOCK port the enclave listens on.
 	Port uint32

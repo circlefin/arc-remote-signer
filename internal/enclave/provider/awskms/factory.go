@@ -11,27 +11,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package cmd
+package awskms
 
 import (
-	"github.com/circlefin/arc-remote-signer/internal/common/config"
-	"github.com/circlefin/arc-remote-signer/internal/enclave"
-	"github.com/spf13/cobra"
+	"context"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
-func init() {
-	rootCmd.AddCommand(runEnclaveCmd)
-}
-
-var runEnclaveCmd = &cobra.Command{
-	Use:   "run-enclave",
-	Short: "Run the enclave service.",
-	Run: func(_ *cobra.Command, _ []string) {
-		neCfg = enclave.NewConfig()
-		config.LoadConfig(neCfg, neCfgFile)
-		err := enclave.Run(neCfg)
-		if err != nil {
-			panic(err)
-		}
-	},
-}
+// Factory builds an ephemeral Provider for one Initialize call.
+// The runtime selects NewWithAttestation or NewForDevelopment and captures
+// configuration via a closure. Tests inject fakes. The ctx is the per-call
+// request context so construction-time work observes the caller's deadline.
+type Factory func(ctx context.Context, awsCfg aws.Config, arns []string) (Provider, error)

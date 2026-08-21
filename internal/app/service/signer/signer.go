@@ -17,12 +17,14 @@
 package signer
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
+	"time"
 
-	"github.com/circlefin/arc-remote-signer/internal/app/provider/awskms"
 	"github.com/circlefin/arc-remote-signer/internal/app/provider/secrets"
 	"github.com/circlefin/arc-remote-signer/internal/common/crypto"
 	"github.com/circlefin/arc-remote-signer/internal/common/logging"
@@ -44,40 +46,52 @@ func getLogger() *logging.Logger {
 }
 
 const (
-	errSignMessage           = "failed to sign message"
-	errInvalidRequest        = "invalid request"
-	errEmptyMessage          = "message cannot be empty"
-	errServiceNotInitialized = "service is not initialized"
+	errSignMessage            = "failed to sign message"
+	errInvalidRequest         = "invalid request"
+	errEmptyMessage           = "message cannot be empty"
+	errServiceNotInitialized  = "service is not initialized"
+	errAttestationExpired     = "attestation document is expired"
+	errAttestationNotValidYet = "attestation certificate is not valid yet"
 )
 
 // Service is the implementation of the Signer gRPC server.
 type Service struct {
 	pb.UnimplementedSignerServiceServer
-	isNitroEnclaveEnabled bool
-	secretPvd             secrets.Provider
-	enclavePvd            pb.EnclaveServiceClient
-	awskmsPvd             awskms.Provider
-	algorithm             pb.Algorithm
-	cache                 *cache
+	secretPvd   secrets.Provider
+	enclavePvd  pb.EnclaveServiceClient
+	algorithm   pb.Algorithm
+	loadedKeyMu sync.RWMutex
+	loadedKey   *keyState
+}
+
+// keyState contains the envelope and the public response data. Initialization
+// sets this state. The background refresh can replace the attestation data.
+type keyState struct {
+	secretEnvelope      *pb.SecretEnvelope
+	publicKey           []byte
+	attestationDocument []byte
+	attestationValidity attestationValidity
 }
 
 // New creates a new instance of the Signer gRPC server.
-func New(ctx context.Context, isNitroEnclaveEnabled bool, keyCfg *Config, secretPvd secrets.Provider, enclavePvd pb.EnclaveServiceClient, awskmsPvd awskms.Provider) (*Service, error) {
+//
+// The host no longer performs any KMS work: the enclave owns key decryption
+// (it retains its KMS client from the Initialize RPC, wired in app.Run before
+// this constructor). The host only relays the wrapped SecretEnvelope.
+func New(ctx context.Context, keyCfg *Config, secretPvd secrets.Provider, enclavePvd pb.EnclaveServiceClient) (*Service, error) {
 	pbAlgorithm, err := toPBAlgorithm(keyCfg.Algorithm)
 	if err != nil {
 		return nil, err
 	}
 	service := &Service{
-		isNitroEnclaveEnabled: isNitroEnclaveEnabled,
-		secretPvd:             secretPvd,
-		enclavePvd:            enclavePvd,
-		awskmsPvd:             awskmsPvd,
-		algorithm:             pbAlgorithm,
-		cache:                 newCache(),
+		secretPvd:  secretPvd,
+		enclavePvd: enclavePvd,
+		algorithm:  pbAlgorithm,
 	}
 	if err := service.initialize(ctx, keyCfg); err != nil {
 		return nil, err
 	}
+	service.startAttestationRefresh(ctx)
 	return service, nil
 }
 
@@ -88,64 +102,57 @@ func (s *Service) initialize(ctx context.Context, keyCfg *Config) error {
 		return fmt.Errorf("failed to get secret: %w", err)
 	}
 
-	// if secret is empty, generate a new key, marshal it and store it in the cache
 	if len(secret) == 0 {
 		return s.generateAndStoreKey(ctx, keyCfg)
 	}
 
-	// if secret is not empty, derive the public key and store it in the cache
 	return s.loadKeyFromSecret(ctx, secret)
 }
 
 func (s *Service) generateAndStoreKey(ctx context.Context, keyCfg *Config) error {
-	/*
-		Nitro is enabled in environments above CI/DEV, so the recipient parameter
-		is included when calling AWS KMS. As a result, plainDataKey will be nil,
-		so we don't need to zero it out here.
-	*/
-	plainDataKey, KMSEncryptedDataKey, enclaveEncryptedDataKey, err := s.awskmsPvd.GenerateDataKey(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to generate data key: %w", err)
-	}
-
-	pbAlgorithm, err := toPBAlgorithm(keyCfg.Algorithm)
-	if err != nil {
-		return err
-	}
-
-	extGenerateRequest := &pb.GenerateKeyRequest{
-		Algorithm:               pbAlgorithm,
-		EnclaveEncryptedDataKey: plainDataKey,
-	}
-
-	if enclaveEncryptedDataKey != nil {
-		extGenerateRequest.EnclaveEncryptedDataKey = enclaveEncryptedDataKey
-	}
-
-	resp, err := s.enclavePvd.GenerateKey(ctx, extGenerateRequest)
+	// First boot: no stored secret. The enclave mints a fresh data key
+	// in-enclave (no host-supplied data key) and returns a self-contained
+	// SecretEnvelope for us to persist verbatim to Secrets Manager.
+	resp, err := s.enclavePvd.GenerateKey(ctx, &pb.GenerateKeyRequest{Algorithm: s.algorithm})
 	if err != nil {
 		return fmt.Errorf("failed to generate key: %w", err)
 	}
-
-	hdr := header{
-		CipherKey:  KMSEncryptedDataKey,
-		CipherData: resp.EncryptedPrivateKey,
-		Nonce:      resp.Nonce,
+	if resp.SecretEnvelope == nil {
+		return errors.New("enclave GenerateKey returned no secret envelope")
+	}
+	if len(resp.PublicKey) == 0 {
+		return errors.New("enclave GenerateKey returned empty public key")
+	}
+	// Validate the envelope is complete before the irreversible Secrets Manager
+	// write. An incomplete envelope would be caught later when the enclave
+	// tries to decrypt it, but only after it has already been persisted — every
+	// subsequent boot would then fail against the corrupt secret.
+	env := resp.SecretEnvelope
+	if len(env.GetKmsEncryptedDataKey()) == 0 || len(env.GetEncryptedPrivateKey()) == 0 || len(env.GetNonce()) == 0 {
+		return errors.New("enclave GenerateKey returned incomplete secret envelope")
 	}
 
-	headerBytes, err := hdr.MarshalBinary()
+	headerBytes, err := headerFromSecretEnvelope(resp.SecretEnvelope).MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("failed to marshal header: %w", err)
+	}
+	publicKeyResp, err := s.getPublicKey(ctx, resp.SecretEnvelope)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(resp.PublicKey, publicKeyResp.PublicKey) {
+		return errors.New("enclave returned different public keys")
+	}
+	loadedKey, err := newKeyState(resp.SecretEnvelope, publicKeyResp)
+	if err != nil {
+		return err
 	}
 
 	if _, err := s.secretPvd.Update(ctx, keyCfg.KeyID, headerBytes); err != nil {
 		return fmt.Errorf("failed to update secret: %w", err)
 	}
 
-	s.cache.set(&key{
-		encryptedKeyMaterial: prepareEncryptedKeyMaterial(s.isNitroEnclaveEnabled, resp.EncryptedPrivateKey, plainDataKey, enclaveEncryptedDataKey, resp.Nonce),
-		publicKey:            resp.PublicKey,
-	})
+	s.storeLoadedKey(loadedKey)
 
 	getLogger().Info(ctx, "loaded signer public key", logging.Entries{"public_key": "0x" + hex.EncodeToString(resp.PublicKey)})
 	return nil
@@ -157,45 +164,167 @@ func (s *Service) loadKeyFromSecret(ctx context.Context, secret []byte) error {
 		return fmt.Errorf("failed to unmarshal header: %w", err)
 	}
 
-	/*
-		Nitro is enabled in environments above CI/DEV, so the recipient parameter
-		is included when calling AWS KMS. As a result, plainDataKey will be nil,
-		so we don't need to zero it out here.
-	*/
-	plainDataKey, enclaveEncryptedDataKey, err := s.awskmsPvd.Decrypt(ctx, hdr.CipherKey)
+	// The stored header records the algorithm the key was generated under. Fail
+	// cleanly on a config/key mismatch instead of silently signing under the
+	// wrong algorithm. Secrets written before this field decode as
+	// ALGORITHM_UNSPECIFIED and fall through to the configured algorithm.
+	if hdr.Algorithm != pb.Algorithm_ALGORITHM_UNSPECIFIED && hdr.Algorithm != s.algorithm {
+		return fmt.Errorf("stored key algorithm %s does not match configured algorithm %s", hdr.Algorithm, s.algorithm)
+	}
+
+	// The enclave owns decryption now: hand it the stored envelope and let it
+	// KMS-decrypt in-enclave. No host-side KMS Decrypt.
+	envelope := hdr.toSecretEnvelope(s.algorithm)
+	resp, err := s.getPublicKey(ctx, envelope)
 	if err != nil {
-		return fmt.Errorf("failed to decrypt data key: %w", err)
+		return err
 	}
 
-	encryptedKeyMaterial := prepareEncryptedKeyMaterial(s.isNitroEnclaveEnabled, hdr.CipherData, plainDataKey, enclaveEncryptedDataKey, hdr.Nonce)
-	extGetPublicKeyRequest := &pb.GetPublicKeyRequest{
-		Algorithm:            s.algorithm,
-		EncryptedKeyMaterial: encryptedKeyMaterial,
-	}
-
-	resp, err := s.enclavePvd.GetPublicKey(ctx, extGetPublicKeyRequest)
+	loadedKey, err := newKeyState(envelope, resp)
 	if err != nil {
-		return fmt.Errorf("failed to get public key: %w", err)
+		return err
 	}
-
-	s.cache.set(&key{
-		encryptedKeyMaterial: encryptedKeyMaterial,
-		publicKey:            resp.PublicKey,
-	})
+	s.storeLoadedKey(loadedKey)
 
 	getLogger().Info(ctx, "loaded signer public key", logging.Entries{"public_key": "0x" + hex.EncodeToString(resp.PublicKey)})
 	return nil
 }
 
-// PublicKey returns the cached signer public key.
-// It returns a gRPC internal error when the service has not been initialized.
+func newKeyState(envelope *pb.SecretEnvelope, resp *pb.GetPublicKeyResponse) (*keyState, error) {
+	var validity attestationValidity
+	if len(resp.AttestationDocument) > 0 {
+		parsedValidity, err := parseAttestationValidity(resp.AttestationDocument)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse attestation document: %w", err)
+		}
+		if err := parsedValidity.validateAt(time.Now()); err != nil {
+			return nil, err
+		}
+		validity = parsedValidity
+	}
+
+	return &keyState{
+		secretEnvelope:      envelope,
+		publicKey:           bytes.Clone(resp.PublicKey),
+		attestationDocument: bytes.Clone(resp.AttestationDocument),
+		attestationValidity: validity,
+	}, nil
+}
+
+func (s *Service) storeLoadedKey(loadedKey *keyState) {
+	s.loadedKeyMu.Lock()
+	s.loadedKey = loadedKey
+	s.loadedKeyMu.Unlock()
+}
+
+func (s *Service) refreshAttestation(ctx context.Context) (attestationValidity, error) {
+	s.loadedKeyMu.RLock()
+	if s.loadedKey == nil {
+		s.loadedKeyMu.RUnlock()
+		return attestationValidity{}, errors.New(errServiceNotInitialized)
+	}
+	envelope := s.loadedKey.secretEnvelope
+	publicKey := bytes.Clone(s.loadedKey.publicKey)
+	currentValidity := s.loadedKey.attestationValidity
+	s.loadedKeyMu.RUnlock()
+
+	resp, err := s.getPublicKey(ctx, envelope)
+	if err != nil {
+		return currentValidity, err
+	}
+	if !bytes.Equal(publicKey, resp.PublicKey) {
+		return currentValidity, errors.New("enclave returned a different public key")
+	}
+	if len(resp.AttestationDocument) == 0 {
+		return currentValidity, errors.New("enclave returned an empty attestation document")
+	}
+	validity, err := parseAttestationValidity(resp.AttestationDocument)
+	if err != nil {
+		return currentValidity, fmt.Errorf("failed to parse attestation document: %w", err)
+	}
+	if err := validity.validateAt(time.Now()); err != nil {
+		return currentValidity, err
+	}
+	if !validity.notAfter.After(currentValidity.notAfter) {
+		return currentValidity, nil
+	}
+
+	s.loadedKeyMu.Lock()
+	if s.loadedKey != nil && bytes.Equal(s.loadedKey.publicKey, publicKey) {
+		s.loadedKey.attestationDocument = bytes.Clone(resp.AttestationDocument)
+		s.loadedKey.attestationValidity = validity
+	}
+	s.loadedKeyMu.Unlock()
+	return validity, nil
+}
+
+func (s *Service) startAttestationRefresh(ctx context.Context) {
+	s.loadedKeyMu.RLock()
+	if s.loadedKey == nil || s.loadedKey.attestationValidity.notAfter.IsZero() {
+		s.loadedKeyMu.RUnlock()
+		return
+	}
+	validity := s.loadedKey.attestationValidity
+	s.loadedKeyMu.RUnlock()
+
+	go s.runAttestationRefresh(ctx, validity)
+}
+
+func (s *Service) runAttestationRefresh(ctx context.Context, validity attestationValidity) {
+	retry := false
+	for {
+		delay := attestationRefreshDelay(time.Now(), validity, retry)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return
+		case <-timer.C:
+		}
+
+		refreshedValidity, err := s.refreshAttestation(ctx)
+		if err != nil {
+			getLogger().ErrorErr(ctx, "failed to refresh attestation document", err, nil)
+			retry = true
+			continue
+		}
+		retry = !refreshedValidity.notAfter.After(validity.notAfter)
+		validity = refreshedValidity
+	}
+}
+
+func (s *Service) getPublicKey(ctx context.Context, envelope *pb.SecretEnvelope) (*pb.GetPublicKeyResponse, error) {
+	resp, err := s.enclavePvd.GetPublicKey(ctx, &pb.GetPublicKeyRequest{SecretEnvelope: envelope})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get public key: %w", err)
+	}
+	if resp == nil || len(resp.PublicKey) == 0 {
+		return nil, errors.New("enclave GetPublicKey returned empty public key")
+	}
+	return resp, nil
+}
+
+// PublicKey returns the cached key and a valid attestation document.
 func (s *Service) PublicKey(_ context.Context, _ *pb.PublicKeyRequest) (*pb.PublicKeyResponse, error) {
-	cached := s.cache.get()
-	if cached == nil {
+	s.loadedKeyMu.RLock()
+	defer s.loadedKeyMu.RUnlock()
+	if s.loadedKey == nil {
 		return nil, status.Error(codes.Internal, errServiceNotInitialized)
 	}
+	if !s.loadedKey.attestationValidity.notAfter.IsZero() {
+		if err := s.loadedKey.attestationValidity.validateAt(time.Now()); err != nil {
+			return nil, status.Error(codes.Unavailable, err.Error())
+		}
+	}
+
 	return &pb.PublicKeyResponse{
-		PublicKey: cached.publicKey,
+		PublicKey:           bytes.Clone(s.loadedKey.publicKey),
+		AttestationDocument: bytes.Clone(s.loadedKey.attestationDocument),
 	}, nil
 }
 
@@ -211,56 +340,27 @@ func (s *Service) Sign(ctx context.Context, req *pb.SignRequest) (*pb.SignRespon
 		return nil, status.Error(codes.InvalidArgument, errEmptyMessage)
 	}
 
-	cached := s.cache.get()
-	if cached == nil {
+	s.loadedKeyMu.RLock()
+	if s.loadedKey == nil {
+		s.loadedKeyMu.RUnlock()
 		return nil, status.Error(codes.Internal, errServiceNotInitialized)
 	}
+	envelope := s.loadedKey.secretEnvelope
+	s.loadedKeyMu.RUnlock()
 
 	// call the enclave to sign the message
 	resp, err := s.enclavePvd.SignMessage(ctx, &pb.SignMessageRequest{
-		Algorithm:            s.algorithm,
-		EncryptedKeyMaterial: cached.encryptedKeyMaterial,
-		Message:              req.Message,
+		SecretEnvelope: envelope,
+		Message:        req.Message,
 	})
 	if err != nil {
 		getLogger().ErrorErr(ctx, errSignMessage, err, nil)
-		// Preserve the original gRPC status code from the enclave
-		if st, ok := status.FromError(err); ok {
-			return nil, st.Err()
-		}
-		// Fallback to Internal if not a gRPC status error
 		return nil, status.Error(codes.Internal, errSignMessage)
 	}
 	// Convert the response back to protobuf format
 	return &pb.SignResponse{
 		Signature: resp.Signature,
 	}, nil
-}
-
-func prepareEncryptedKeyMaterial(isNitroEnclaveEnabled bool, encryptedPrivateKey, plainDataKey, enclaveEncryptedDataKey, nonce []byte) *pb.EncryptedKeyMaterial {
-	// When we use the ricipient(attestation document) parameter, instead of returning the plaintext data, KMS
-	// encrypts the plaintext data with the public key in the attestation document,
-	// and returns the resulting ciphertext in the CiphertextForRecipient field
-	// in the response. This ciphertext can be decrypted only with the private key
-	// in the enclave. The Plaintext field in the response is null or empty.
-	// So we use the `isNitroEnclaveEnabled` flag to determine whether to use the enclave encrypted data key or the plaintext data key.
-	// If we use the plaintext data key with Nitro Enclave, it will cause the decryption failure.
-	//
-	// For more details, please refer to the following document:
-	// https://docs.aws.amazon.com/kms/latest/developerguide/services-nitro-enclaves.html
-	if isNitroEnclaveEnabled {
-		return newEncryptedKeyMaterial(encryptedPrivateKey, enclaveEncryptedDataKey, nonce)
-	}
-	return newEncryptedKeyMaterial(encryptedPrivateKey, plainDataKey, nonce)
-}
-
-func newEncryptedKeyMaterial(encryptedPrivateKey, dataKey, nonce []byte) *pb.EncryptedKeyMaterial {
-	material := &pb.EncryptedKeyMaterial{
-		EncryptedPrivateKey:     encryptedPrivateKey,
-		EnclaveEncryptedDataKey: dataKey,
-		Nonce:                   nonce,
-	}
-	return material
 }
 
 func toPBAlgorithm(algorithm crypto.Algorithm) (pb.Algorithm, error) {

@@ -17,7 +17,6 @@ package awskms
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -32,7 +31,19 @@ import (
 const (
 	testAwsInvalidArn       = "arn:aws:kms:us-east-1:000000000000:alias/invalid-arn"
 	testAwsInvalidFormatArn = "arnawskms:us-east-1:000000000000:alias/invalid-arn"
+	testAWSRegion           = "us-east-1"
+	testLocalStackEndpoint  = "http://localhost:4566"
 )
+
+func newIntegrationConfig() *Config {
+	return &Config{
+		Arns: []string{
+			"arn:aws:kms:us-east-1:000000000000:alias/dev-multi-region-crypto",
+			"arn:aws:kms:us-west-2:000000000000:alias/dev-multi-region-crypto",
+		},
+		ConnectTimeout: 1500,
+	}
+}
 
 type TestSuite struct {
 	ctrl *gomock.Controller
@@ -46,18 +57,18 @@ type TestSuite struct {
 func (suite *TestSuite) SetupTest() {
 	suite.ctrl = gomock.NewController(suite.T())
 	// Get default config.
-	cfg := NewProviderConfig()
+	cfg := newIntegrationConfig()
 	var err error
 	// Static credentials are required for localstack; without them the SDK falls back to EC2 IMDS which is unavailable in CI.
-	awsCfg, err := awsSdkConfig.LoadDefaultConfig(context.Background(), awsSdkConfig.WithRegion(cfg.Localstack.Region), awsSdkConfig.WithBaseEndpoint(cfg.Localstack.Endpoint), awsSdkConfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
+	awsCfg, err := awsSdkConfig.LoadDefaultConfig(context.Background(), awsSdkConfig.WithRegion(testAWSRegion), awsSdkConfig.WithBaseEndpoint(testLocalStackEndpoint), awsSdkConfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
 	suite.Require().NoError(err)
 
 	// Init provider.
-	pvd, err := New(context.Background(), cfg, awsCfg, nil)
+	pvd, err := NewForDevelopment(context.Background(), cfg, awsCfg)
 	suite.Require().NoError(err)
 	suite.provider = pvd
 
-	clients, err := initClients(awsCfg, cfg.Arns, time.Duration(cfg.ConnectTimeout)*time.Millisecond)
+	clients, err := initClients(awsCfg, cfg.Arns, time.Duration(cfg.ConnectTimeout)*time.Millisecond, "")
 	suite.Require().NoError(err)
 
 	suite.providerImpl = provider{
@@ -74,13 +85,13 @@ func (suite *TestSuite) TearDownTest() {
 }
 
 func (suite *TestSuite) TestNew() {
-	awskmsCfg := NewProviderConfig()
+	awskmsCfg := newIntegrationConfig()
 	// Static credentials are required for localstack; without them the SDK falls back to EC2 IMDS which is unavailable in CI.
-	awsCfg, err := awsSdkConfig.LoadDefaultConfig(context.Background(), awsSdkConfig.WithRegion(awskmsCfg.Localstack.Region), awsSdkConfig.WithBaseEndpoint(awskmsCfg.Localstack.Endpoint), awsSdkConfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
+	awsCfg, err := awsSdkConfig.LoadDefaultConfig(context.Background(), awsSdkConfig.WithRegion(testAWSRegion), awsSdkConfig.WithBaseEndpoint(testLocalStackEndpoint), awsSdkConfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
 	suite.Require().NoError(err)
 
 	suite.Run("success", func() {
-		_, err = New(context.Background(), awskmsCfg, awsCfg, nil)
+		_, err = NewForDevelopment(context.Background(), awskmsCfg, awsCfg)
 		suite.Require().NoError(err)
 	})
 
@@ -91,7 +102,7 @@ func (suite *TestSuite) TestNew() {
 		}()
 
 		awskmsCfg.Arns = []string{}
-		_, err = New(context.Background(), awskmsCfg, awsCfg, nil)
+		_, err = NewForDevelopment(context.Background(), awskmsCfg, awsCfg)
 		suite.Require().Error(err)
 	})
 }
@@ -146,11 +157,10 @@ type TestMultiRegionFailureOverSuite struct {
 
 func (suite *TestMultiRegionFailureOverSuite) SetupSuite() {
 	// Get default config.
-	cfg := NewProviderConfig()
+	cfg := newIntegrationConfig()
 	// Static credentials are required for localstack; without them the SDK falls back to EC2 IMDS which is unavailable in CI.
-	awsCfg, err := awsSdkConfig.LoadDefaultConfig(context.Background(), awsSdkConfig.WithRegion(cfg.Localstack.Region), awsSdkConfig.WithBaseEndpoint(cfg.Localstack.Endpoint), awsSdkConfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
+	awsCfg, err := awsSdkConfig.LoadDefaultConfig(context.Background(), awsSdkConfig.WithRegion(testAWSRegion), awsSdkConfig.WithBaseEndpoint(testLocalStackEndpoint), awsSdkConfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
 	suite.Require().NoError(err)
-	cfg.ConnectTimeout = 1500
 
 	// Get testing KEYs.
 	arns := cfg.Arns
@@ -158,13 +168,13 @@ func (suite *TestMultiRegionFailureOverSuite) SetupSuite() {
 
 	// Init provider1 with arn_1.
 	cfg.Arns = arns[:1]
-	provider, err := New(context.Background(), cfg, awsCfg, nil)
+	provider, err := NewForDevelopment(context.Background(), cfg, awsCfg)
 	suite.Require().NoError(err)
 	suite.provider1 = provider
 
 	// Init provider2 with arn_2.
 	cfg.Arns = arns[1:]
-	provider, err = New(context.Background(), cfg, awsCfg, nil)
+	provider, err = NewForDevelopment(context.Background(), cfg, awsCfg)
 	suite.Require().NoError(err)
 	suite.provider2 = provider
 }
@@ -182,9 +192,9 @@ func (suite *TestMultiRegionFailureOverSuite) TestEncryptWithArn1DecryptWithArn2
 func (suite *TestMultiRegionFailureOverSuite) TestInvalidArnMultiRegionFailureOver() {
 	// This verifies that when there is an issue with the key ARN, it can be switched to ARN2.
 	// Get default config.
-	cfg := NewProviderConfig()
+	cfg := newIntegrationConfig()
 	// Static credentials are required for localstack; without them the SDK falls back to EC2 IMDS which is unavailable in CI.
-	awsCfg, err := awsSdkConfig.LoadDefaultConfig(context.Background(), awsSdkConfig.WithRegion(cfg.Localstack.Region), awsSdkConfig.WithBaseEndpoint(cfg.Localstack.Endpoint), awsSdkConfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
+	awsCfg, err := awsSdkConfig.LoadDefaultConfig(context.Background(), awsSdkConfig.WithRegion(testAWSRegion), awsSdkConfig.WithBaseEndpoint(testLocalStackEndpoint), awsSdkConfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
 	suite.Require().NoError(err)
 
 	// Get testing KEYs.
@@ -193,7 +203,7 @@ func (suite *TestMultiRegionFailureOverSuite) TestInvalidArnMultiRegionFailureOv
 
 	suite.Run("withOneInvalidARNs", func() {
 		cfg.Arns = append([]string{testAwsInvalidArn}, arns[:1]...)
-		provider, err := New(context.Background(), cfg, awsCfg, nil)
+		provider, err := NewForDevelopment(context.Background(), cfg, awsCfg)
 		suite.Require().NoError(err)
 
 		plainDataKey, cipherDataKey, _, err := provider.GenerateDataKey(context.Background())
@@ -206,7 +216,7 @@ func (suite *TestMultiRegionFailureOverSuite) TestInvalidArnMultiRegionFailureOv
 
 	suite.Run("withTwoInvalidARNs", func() {
 		cfg.Arns = append([]string{testAwsInvalidArn, testAwsInvalidArn}, arns[:1]...)
-		provider, err := New(context.Background(), cfg, awsCfg, nil)
+		provider, err := NewForDevelopment(context.Background(), cfg, awsCfg)
 		suite.Require().NoError(err)
 
 		plainDataKey, cipherDataKey, _, err := provider.GenerateDataKey(context.Background())
@@ -220,15 +230,14 @@ func (suite *TestMultiRegionFailureOverSuite) TestInvalidArnMultiRegionFailureOv
 
 func (suite *TestMultiRegionFailureOverSuite) TestWithAllInvalidArn() {
 	// Get default config.
-	cfg := NewProviderConfig()
-	cfg.ConnectTimeout = 1500
+	cfg := newIntegrationConfig()
 	// Static credentials are required for localstack; without them the SDK falls back to EC2 IMDS which is unavailable in CI.
-	awsCfg, err := awsSdkConfig.LoadDefaultConfig(context.Background(), awsSdkConfig.WithRegion(cfg.Localstack.Region), awsSdkConfig.WithBaseEndpoint(cfg.Localstack.Endpoint), awsSdkConfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
+	awsCfg, err := awsSdkConfig.LoadDefaultConfig(context.Background(), awsSdkConfig.WithRegion(testAWSRegion), awsSdkConfig.WithBaseEndpoint(testLocalStackEndpoint), awsSdkConfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
 	suite.Require().NoError(err)
 
 	// Init provider with two invalid arn.
 	cfg.Arns = []string{testAwsInvalidArn, testAwsInvalidArn}
-	provider, err := New(context.Background(), cfg, awsCfg, nil)
+	provider, err := NewForDevelopment(context.Background(), cfg, awsCfg)
 	suite.Require().NoError(err)
 
 	suite.Run("Encrypt", func() {
@@ -249,15 +258,14 @@ func (suite *TestMultiRegionFailureOverSuite) TestWithAllInvalidArn() {
 
 func (suite *TestMultiRegionFailureOverSuite) TestNewProviderWithInvalidFormatArn() {
 	// This verifies that when creating a new provider, an error will be returned if an ARN that does not comply with the format is provided.
-	cfg := NewProviderConfig()
-	cfg.ConnectTimeout = 1500
+	cfg := newIntegrationConfig()
 	// Static credentials are required to prevent the SDK from attempting EC2 IMDS credential lookup in CI.
-	awsCfg, err := awsSdkConfig.LoadDefaultConfig(context.Background(), awsSdkConfig.WithRegion(cfg.Localstack.Region), awsSdkConfig.WithBaseEndpoint(cfg.Localstack.Endpoint), awsSdkConfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
+	awsCfg, err := awsSdkConfig.LoadDefaultConfig(context.Background(), awsSdkConfig.WithRegion(testAWSRegion), awsSdkConfig.WithBaseEndpoint(testLocalStackEndpoint), awsSdkConfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
 	suite.Require().NoError(err)
 
 	cfg.Arns = []string{testAwsInvalidFormatArn}
-	_, err = New(context.Background(), cfg, awsCfg, nil)
-	suite.Require().EqualError(err, fmt.Sprintf("invalid arn(arn_%v))", 1))
+	_, err = NewForDevelopment(context.Background(), cfg, awsCfg)
+	suite.Require().ErrorIs(err, ErrInvalidARN)
 }
 
 func TestTestMultiRegionFailureOverSuite(t *testing.T) {

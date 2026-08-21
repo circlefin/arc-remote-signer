@@ -59,7 +59,7 @@ func TestNew_NitroEnabledWithInvalidCID(t *testing.T) {
 	require.Nil(t, client)
 	require.Nil(t, conn)
 	require.Error(t, err)
-	require.EqualError(t, err, "nitro enclave is enabled but cid or port is invalid")
+	require.EqualError(t, err, "nitro enclave mode requires a valid CID and port")
 }
 
 func TestNew_NitroEnabledWithInvalidPort(t *testing.T) {
@@ -73,7 +73,7 @@ func TestNew_NitroEnabledWithInvalidPort(t *testing.T) {
 	require.Nil(t, client)
 	require.Nil(t, conn)
 	require.Error(t, err)
-	require.EqualError(t, err, "nitro enclave is enabled but cid or port is invalid")
+	require.EqualError(t, err, "nitro enclave mode requires a valid CID and port")
 }
 
 func TestNew_InvalidTarget(t *testing.T) {
@@ -89,4 +89,45 @@ func TestNew_InvalidTarget(t *testing.T) {
 	require.Nil(t, conn)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "failed to create enclave client connection")
+}
+
+func TestNewNitro_IgnoresRuntimeToggle(t *testing.T) {
+	cfg := NewProviderConfig()
+	cfg.NitroEnclave.Enabled = false
+
+	client, conn, err := NewNitro(cfg)
+
+	require.NoError(t, err)
+	require.NotNil(t, client)
+	require.NotNil(t, conn)
+	require.NoError(t, conn.Close())
+}
+
+func TestNewNitro_RequiresCIDAndPort(t *testing.T) {
+	nilNitroConfig := NewProviderConfig()
+	nilNitroConfig.NitroEnclave = nil
+	zeroCIDConfig := NewProviderConfig()
+	zeroCIDConfig.NitroEnclave.CID = 0
+	zeroPortConfig := NewProviderConfig()
+	zeroPortConfig.NitroEnclave.Port = 0
+
+	tests := []struct {
+		name string
+		cfg  *ProviderConfig
+	}{
+		{name: "provider configuration is nil", cfg: nil},
+		{name: "Nitro configuration is nil", cfg: nilNitroConfig},
+		{name: "CID is zero", cfg: zeroCIDConfig},
+		{name: "port is zero", cfg: zeroPortConfig},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, conn, err := NewNitro(tt.cfg)
+
+			require.Nil(t, client)
+			require.Nil(t, conn)
+			require.ErrorContains(t, err, "requires a valid CID and port")
+		})
+	}
 }

@@ -17,8 +17,20 @@
 package enclave
 
 import (
-	enclave "github.com/edgebitio/nitro-enclaves-sdk-go"
+	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"errors"
+	"fmt"
+
+	"github.com/circlefin/arc-remote-signer/internal/enclave/provider/enclave/kmsrecipient"
+	"github.com/hf/nsm"
+	"github.com/hf/nsm/request"
+	"github.com/hf/nsm/response"
 )
+
+const rsaKeyBits = 2048
 
 var _ Provider = (*provider)(nil)
 
@@ -26,40 +38,91 @@ var _ Provider = (*provider)(nil)
 type Provider interface {
 	DecryptKMSEnvelopedKey(ciphertext []byte) (plainText []byte, err error)
 	AttestationDocument() []byte
+	Attest(userData []byte) ([]byte, error)
 }
+
+type nsmSession interface {
+	Send(request.Request) (response.Response, error)
+	Close() error
+}
+
+type nsmSessionFactory func() (nsmSession, error)
 
 // provider is the implementation of the Provider interface.
 type provider struct {
-	enclaveHandle       *enclave.EnclaveHandle
+	privateKey          *rsa.PrivateKey
 	attestationDocument []byte
+	openSession         nsmSessionFactory
 }
 
 // New creates a new provider.
 func New() (Provider, error) {
-	handler, err := enclave.GetOrInitializeHandle()
+	privateKey, err := rsa.GenerateKey(rand.Reader, rsaKeyBits)
+	if err != nil {
+		return nil, fmt.Errorf("generate attestation key: %w", err)
+	}
+	return newProvider(openDefaultSession, privateKey)
+}
+
+func openDefaultSession() (nsmSession, error) {
+	return nsm.OpenDefaultSession()
+}
+
+func newProvider(openSession nsmSessionFactory, privateKey *rsa.PrivateKey) (*provider, error) {
+	if privateKey == nil {
+		return nil, errors.New("attestation private key is nil")
+	}
+	publicKey, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("marshal attestation public key: %w", err)
+	}
+	document, err := requestAttestation(openSession, &request.Attestation{PublicKey: publicKey})
 	if err != nil {
 		return nil, err
 	}
-	attestationDocument, err := handler.Attest(enclave.AttestationOptions{})
-	if err != nil {
-		return nil, err
-	}
+
 	return &provider{
-		enclaveHandle:       handler,
-		attestationDocument: attestationDocument,
+		privateKey:          privateKey,
+		attestationDocument: document,
+		openSession:         openSession,
 	}, nil
 }
 
-// DecryptKMSEnvelopedKey decrypts the given ciphertext using the Nitro enclave.
-func (n *provider) DecryptKMSEnvelopedKey(ciphertext []byte) (plainText []byte, err error) {
-	plainText, err = n.enclaveHandle.DecryptKMSEnvelopedKey(ciphertext)
+func requestAttestation(openSession nsmSessionFactory, req *request.Attestation) ([]byte, error) {
+	session, err := openSession()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open NSM session: %w", err)
 	}
-	return plainText, nil
+	defer func() { _ = session.Close() }()
+
+	result, err := session.Send(req)
+	if err != nil {
+		return nil, fmt.Errorf("request NSM attestation: %w", err)
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("request NSM attestation: %s", result.Error)
+	}
+	if result.Attestation == nil || len(result.Attestation.Document) == 0 {
+		return nil, errors.New("NSM response missing attestation document")
+	}
+
+	return bytes.Clone(result.Attestation.Document), nil
+}
+
+// DecryptKMSEnvelopedKey decrypts CiphertextForRecipient with the in-memory RSA
+// private key whose public key is included in the NSM-signed attestation.
+func (n *provider) DecryptKMSEnvelopedKey(ciphertext []byte) (plainText []byte, err error) {
+	return kmsrecipient.Decrypt(n.privateKey, ciphertext)
 }
 
 // AttestationDocument returns the attestation document.
 func (n *provider) AttestationDocument() []byte {
-	return n.attestationDocument
+	return bytes.Clone(n.attestationDocument)
+}
+
+// Attest opens an NSM session. Attest requests a new document. Attest closes the
+// session before it returns. The signed user_data field contains the supplied
+// bytes.
+func (n *provider) Attest(userData []byte) ([]byte, error) {
+	return requestAttestation(n.openSession, &request.Attestation{UserData: bytes.Clone(userData)})
 }

@@ -1,13 +1,38 @@
+ARG GO_IMAGE=golang:1.25@sha256:00feed335fe561979f2cdcc30a5191231977c5631fe79c40f7d3ab63b4fa222f
 ARG RUST_IMAGE=rust:1.95-bookworm@sha256:adab7941580c74513aa3347f2d2a1f975498280743d29ec62978ba12e3540d3a
-ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252
+ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716
 ARG NITRO_CLI_VERSION=v1.4.4
 # SHA256 of the source tarball for ${NITRO_CLI_VERSION}. Verified at build
 # time so a retagged upstream cannot silently change the binary we ship.
 ARG NITRO_CLI_SHA256=5f8182119496a07403b755e1c7e62780acc71ba136639226cdbb508482836e01
 
+### Build the application binary.
+FROM ${GO_IMAGE} AS app-builder
+
+ARG TARGETARCH
+
+RUN --mount=type=bind,from=certs,target=/usr/local/share/ca-certificates/ \
+    update-ca-certificates && \
+    go install github.com/bufbuild/buf/cmd/buf@v1.50.0 && \
+    go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6 && \
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+WORKDIR /src/proto
+RUN buf generate
+WORKDIR /src
+RUN export CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} && \
+    go build -o /out/app . && \
+    go build -o /out/enclave ./cmd/enclave && \
+    go build -tags=prod -o /out/app-production .
+
 ### Build grpc-health-probe from master (404552c) to get grpc v1.79.3 (CVE-2026-33186 fix).
 ### TODO: Revert to `COPY --from=ghcr.io/grpc-ecosystem/grpc-health-probe:<tag>` once a tagged release includes grpc >= v1.79.3.
-FROM golang:1.25 AS grpc-health-probe-builder
+FROM ${GO_IMAGE} AS grpc-health-probe-builder
 
 RUN --mount=type=bind,from=certs,target=/usr/local/share/ca-certificates/ \
     update-ca-certificates && \
@@ -36,40 +61,40 @@ RUN curl -sSfL -o /tmp/nitro-cli.tar.gz \
     install -D -m 0755 build/nitro_cli/release/nitro-cli /out/usr/bin/nitro-cli && \
     mkdir -p /out/var/log/nitro_enclaves /out/run/nitro_enclaves
 
-### This is the base image that all other images inherit from
-FROM ${DEBIAN_IMAGE} AS base
-
-ARG TARGETARCH
+### Runtime files shared by production and development images.
+FROM ${DEBIAN_IMAGE} AS runtime-base
 
 WORKDIR /usr/local/circle
 
-COPY --chmod=0750 bin/$TARGETARCH/app ./app
-COPY configs ./configs
-COPY deployments ./deployments
-
-## Copy CA certs from the builder so apt trusts the configured CA bundle
-## (e.g. when the build runs behind a proxy with a custom root CA).
+# Use the builder CA bundle when the build uses a custom root CA.
 COPY --from=grpc-health-probe-builder /etc/ssl/certs /etc/ssl/certs
-
-## Install common dependencies for all targets
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        socat \
-        jq && \
-    rm -rf /var/lib/apt/lists/*
-
 COPY --from=grpc-health-probe-builder /grpc-health-probe /usr/local/bin/grpc_health_probe
 
-### This is the image that runs outside the nitro enclave, but does not include the enclave binary (EIF file)
-FROM base AS signer
+### Runtime files shared by the production signer images.
+FROM runtime-base AS production-runtime
 
+COPY --from=app-builder --chmod=0750 /out/app-production ./app
+COPY configs/app.production.yaml ./config.yaml
+
+### The signer image runs a production host with an external Nitro enclave.
+FROM production-runtime AS signer
+
+COPY --chmod=0750 docker/run_proxy.production.sh ./run_proxy.sh
+ENTRYPOINT ["/usr/local/circle/run_proxy.sh"]
+
+### The signer-dev image runs the host and enclave processes without a Nitro EIF.
+FROM runtime-base AS signer-dev
+
+COPY --from=app-builder --chmod=0750 /out/app ./app
+COPY --from=app-builder --chmod=0750 /out/enclave ./enclave
+COPY configs ./configs
+COPY deployments ./deployments
 COPY --chmod=0750 docker/run_proxy.sh ./run_proxy.sh
-COPY --chmod=0750 docker/run_enclave.sh ./run_enclave.sh
 COPY --chmod=0750 docker/run_enclave.dev.sh ./run_enclave.dev.sh
 ENTRYPOINT ["/usr/local/circle/run_proxy.sh"]
 
-### This is the image that runs outside the nitro enclave, including the enclave binary (EIF file)
-FROM signer AS signer-with-enclave
+### The signer-with-enclave image includes the production EIF.
+FROM production-runtime AS signer-with-enclave
 
 ARG ENCLAVE_EIF
 ARG ENCLAVE_PCR0=""
@@ -81,6 +106,12 @@ LABEL enclave.pcr0="${ENCLAVE_PCR0}" \
       enclave.pcr2="${ENCLAVE_PCR2}"
 
 COPY --from=nitro-cli-builder /out/ /
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        jq \
+        libssl3 && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY $ENCLAVE_EIF ./enclave.eif
 

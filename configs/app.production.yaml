@@ -1,0 +1,39 @@
+env: prod
+public:
+  server:
+    host: 0.0.0.0
+    port: 10340
+    tls:
+      enabled: false
+      cert: ""
+      key: ""
+      clientAuth:
+        enabled: false
+        ca: ""
+    reflection:
+      enabled: false
+service:
+  signer:
+    keyId: "00000000-0000-0000-0000-000000000000"
+    algorithm: "ed25519"
+provider:
+  enclave:
+    client:
+      requestTimeoutMS: 500
+  awskms:
+    arns: []
+profiler:
+  enabled: false
+metrics:
+  statsd:
+    host: 127.0.0.1
+    port: 8125
+    telemetryDisabled: true
+  prometheus:
+    enabled: false
+    host: 0.0.0.0
+    port: 9090
+    path: /metrics
+vsockproxy:
+  basePort: 10316
+  maxConns: 50

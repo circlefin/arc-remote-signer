@@ -7,10 +7,56 @@ option go_package = "github.com/circlefin/arc-remote-signer/proto/pb";
 import "buf/validate/validate.proto";
 
 service EnclaveService {
+  rpc Initialize(InitializeRequest) returns (InitializeResponse) {}
   rpc GenerateKey(GenerateKeyRequest) returns (GenerateKeyResponse) {}
   rpc GetPublicKey(GetPublicKeyRequest) returns (GetPublicKeyResponse) {}
   rpc SignMessage(SignMessageRequest) returns (SignMessageResponse) {}
-  rpc GetAttestation(GetAttestationRequest) returns (GetAttestationResponse) {}
+}
+
+message AwsCredentials {
+  string access_key_id = 1 [(buf.validate.field).string.min_len = 1];
+  string secret_access_key = 2 [(buf.validate.field).string.min_len = 1];
+  // session_token is required (min_len = 1). Nitro Enclave deployments
+  // always source credentials from STS (instance role / attestation-based
+  // role assumption), which mints a session token; long-lived IAM user
+  // credentials without a session token are intentionally rejected.
+  string session_token = 3 [(buf.validate.field).string.min_len = 1];
+  string region = 4 [(buf.validate.field).string.min_len = 1];
+}
+
+message InitializeRequest {
+  AwsCredentials credentials = 1 [(buf.validate.field).required = true];
+  // kms_key_arns is the multi-region list of KMS key ARNs the enclave
+  // exercises during Initialize to verify reachability of AWS KMS (via
+  // awsproxy) and that the host-supplied credentials authenticate. Each ARN
+  // gets a region-routed KMS client, and failed calls continue through the
+  // ordered list. At least one ARN required.
+  repeated string kms_key_arns = 2 [(buf.validate.field).repeated = {min_items: 1, items: {string: {min_len: 1}}}];
+  // kms_localstack_enabled selects LocalStack instead of AWS KMS. Nitro
+  // Enclave deployments must keep this value false.
+  bool kms_localstack_enabled = 3;
+}
+
+message InitializeResponse {}
+
+// SecretEnvelope is the wrapped signing key: the AES data key is KMS-
+// encrypted and the private key is AES-GCM-encrypted under that data key.
+// It is the enclave's single wrapped-key wire format; the host persists it
+// verbatim and passes it back on read RPCs, and the enclave KMS-decrypts it
+// in-enclave (attestation -> RecipientInfo in Nitro).
+message SecretEnvelope {
+  Algorithm algorithm = 1 [(buf.validate.field).enum = {
+    defined_only: true,
+    not_in: [0]
+  }];
+  // kms_encrypted_data_key is the standard KMS ciphertext of the AES data
+  // key. The enclave calls KMS Decrypt on it to recover the data key.
+  bytes kms_encrypted_data_key = 2 [(buf.validate.field).bytes.min_len = 1];
+  // encrypted_private_key is the AES-GCM ciphertext of the serialized
+  // private key.
+  bytes encrypted_private_key = 3 [(buf.validate.field).bytes.min_len = 1];
+  // nonce is the AES-GCM nonce for encrypted_private_key.
+  bytes nonce = 4 [(buf.validate.field).bytes.min_len = 1];
 }
 
 enum Algorithm {
@@ -20,52 +66,47 @@ enum Algorithm {
 }
 
 message GenerateKeyRequest {
+  reserved 2;
+  reserved "enclave_encrypted_data_key";
   Algorithm algorithm = 1 [(buf.validate.field).enum = {
     defined_only: true,
     not_in: [0]
   }];
-  bytes enclave_encrypted_data_key = 2 [(buf.validate.field).bytes.min_len = 1];
 }
 
 message GenerateKeyResponse {
+  reserved 2, 3;
+  reserved "encrypted_private_key", "nonce";
   bytes public_key = 1 [(buf.validate.field).bytes.min_len = 1];
-  bytes encrypted_private_key = 2 [(buf.validate.field).bytes.min_len = 1];
-  bytes nonce = 3 [(buf.validate.field).bytes.min_len = 1];
-}
-
-message EncryptedKeyMaterial {
-  bytes encrypted_private_key = 1 [(buf.validate.field).bytes.min_len = 1];
-  bytes enclave_encrypted_data_key = 2 [(buf.validate.field).bytes.min_len = 1];
-  bytes nonce = 3 [(buf.validate.field).bytes.min_len = 1];
+  // secret_envelope is the ready-to-store wrapped key the host persists
+  // verbatim to Secrets Manager.
+  SecretEnvelope secret_envelope = 4 [(buf.validate.field).required = true];
 }
 
 message GetPublicKeyRequest {
-  Algorithm algorithm = 1 [(buf.validate.field).enum = {
-    defined_only: true,
-    not_in: [0]
-  }];
-  EncryptedKeyMaterial encrypted_key_material = 2 [(buf.validate.field).required = true];
+  reserved 1, 2;
+  reserved "algorithm", "encrypted_key_material";
+  // secret_envelope is the wrapped key; the enclave KMS-decrypts it
+  // in-enclave. Its algorithm field is the source of truth.
+  SecretEnvelope secret_envelope = 3 [(buf.validate.field).required = true];
 }
 
 message GetPublicKeyResponse {
   bytes public_key = 1 [(buf.validate.field).bytes.min_len = 1];
+  // attestation_document binds public_key to the Nitro enclave. It is empty
+  // when Nitro mode is disabled.
+  bytes attestation_document = 2;
 }
 
 message SignMessageRequest {
-  Algorithm algorithm = 1 [(buf.validate.field).enum = {
-    defined_only: true,
-    not_in: [0]
-  }];
-  EncryptedKeyMaterial encrypted_key_material = 2 [(buf.validate.field).required = true];
+  reserved 1, 2;
+  reserved "algorithm", "encrypted_key_material";
   bytes message = 3 [(buf.validate.field).bytes.min_len = 1];
+  // secret_envelope is the wrapped key; the enclave KMS-decrypts it
+  // in-enclave. Its algorithm field is the source of truth.
+  SecretEnvelope secret_envelope = 4 [(buf.validate.field).required = true];
 }
 
 message SignMessageResponse {
   bytes signature = 1 [(buf.validate.field).bytes.min_len = 1];
-}
-
-message GetAttestationRequest {}
-
-message GetAttestationResponse {
-  bytes attestation_document = 1 [(buf.validate.field).bytes.min_len = 1];
 }

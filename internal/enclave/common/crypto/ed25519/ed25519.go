@@ -18,6 +18,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
+
+	"github.com/hdevalence/ed25519consensus"
 )
 
 // Key represents an Ed25519 key.
@@ -74,12 +76,6 @@ func Deserialize(data []byte) (*Key, error) {
 
 	privateKey := ed25519.PrivateKey(data)
 
-	// Verify the key is valid by checking if we can derive the public key
-	publicKey := privateKey.Public().(ed25519.PublicKey)
-	if len(publicKey) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("failed to derive valid public key")
-	}
-
 	return &Key{
 		privateKey: privateKey,
 	}, nil
@@ -94,5 +90,6 @@ func VerifySignedMessage(signature []byte, message []byte, publicKey []byte) (bo
 		return false, fmt.Errorf("invalid signature size: expected %d, got %d", ed25519.SignatureSize, len(signature))
 	}
 
-	return ed25519.Verify(ed25519.PublicKey(publicKey), message, signature), nil
+	// Use ZIP-215 verification so remote signer behavior matches Malachite/Arc consensus semantics.
+	return ed25519consensus.Verify(ed25519.PublicKey(publicKey), message, signature), nil
 }
