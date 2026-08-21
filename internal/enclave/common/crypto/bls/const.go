@@ -29,6 +29,6 @@ const (
 // Refer to BLS Signatures IETF standard for more details: https://www.ietf.org/archive/id/draft-irtf-cfrg-bls-signature-05.html#section-4.2
 // Reference implementation: https://github.com/ava-labs/avalanchego/blob/master/utils/crypto/bls/ciphersuite.go#L13-L16
 var (
-	// DSTSignature is the domain separation tag for minimal-signature-size BLS signatures.
+	// DSTSignature is the domain separation tag for minimal-public-key-size BLS signatures.
 	DSTSignature = []byte("BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_")
 )

@@ -26,21 +26,33 @@ import (
 
 // New creates a new enclave provider.
 func New(pc *ProviderConfig) (pb.EnclaveServiceClient, *grpc.ClientConn, error) {
+	var extraDialOptions []grpc.DialOption
+	if pc != nil && pc.NitroEnclave != nil && pc.NitroEnclave.Enabled {
+		if pc.NitroEnclave.CID == 0 || pc.NitroEnclave.Port == 0 {
+			return nil, nil, fmt.Errorf("nitro enclave mode requires a valid CID and port")
+		}
+		extraDialOptions = append(extraDialOptions, grpc.WithContextDialer(NewVsockDialer(pc.NitroEnclave.CID, pc.NitroEnclave.Port)))
+	}
+	return newClient(pc, extraDialOptions...)
+}
+
+// NewNitro creates an enclave client that always uses VSOCK.
+func NewNitro(pc *ProviderConfig) (pb.EnclaveServiceClient, *grpc.ClientConn, error) {
+	if pc == nil || pc.NitroEnclave == nil || pc.NitroEnclave.CID == 0 || pc.NitroEnclave.Port == 0 {
+		return nil, nil, fmt.Errorf("nitro enclave mode requires a valid CID and port")
+	}
+	return newClient(
+		pc,
+		grpc.WithContextDialer(NewVsockDialer(pc.NitroEnclave.CID, pc.NitroEnclave.Port)),
+	)
+}
+
+func newClient(pc *ProviderConfig, extraDialOptions ...grpc.DialOption) (pb.EnclaveServiceClient, *grpc.ClientConn, error) {
 	if pc == nil {
 		return nil, nil, fmt.Errorf("provider config is nil")
 	}
 	if pc.Client == nil {
 		return nil, nil, fmt.Errorf("provider client config is nil")
-	}
-
-	nitroEnabled := pc.NitroEnclave != nil && pc.NitroEnclave.Enabled
-	if nitroEnabled && (pc.NitroEnclave.CID <= 0 || pc.NitroEnclave.Port == 0) {
-		return nil, nil, fmt.Errorf("nitro enclave is enabled but cid or port is invalid")
-	}
-
-	var extraDialOptions []grpc.DialOption
-	if nitroEnabled {
-		extraDialOptions = append(extraDialOptions, grpc.WithContextDialer(NewVsockDialer(pc.NitroEnclave.CID, pc.NitroEnclave.Port)))
 	}
 
 	conn, err := client.NewInsecureClientConn(pc.Client.BaseURL, *pc.Client, extraDialOptions...)

@@ -1,0 +1,114 @@
+name: Build Docker
+
+on:
+  workflow_call:
+    outputs:
+      docker_archive_artifact_name:
+        description: Docker archive artifact name for the built signer-with-enclave image
+        value: ${{ jobs.build.outputs.docker_archive_artifact_name }}
+    inputs:
+      runner:
+        type: string
+        default: ubuntu-latest
+      docker_archive_artifact_name:
+        description: Artifact name for an optional signer-with-enclave docker archive upload
+        type: string
+        default: ""
+      enclave_artifact_name:
+        type: string
+        required: true
+      enclave_file:
+        type: string
+        required: true
+      enclave_pcr0:
+        type: string
+        required: true
+      enclave_pcr1:
+        type: string
+        required: true
+      enclave_pcr2:
+        type: string
+        required: true
+
+jobs:
+  build:
+    name: Build signer-with-enclave
+    permissions:
+      contents: read
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      docker_archive_artifact_name: ${{ steps.archive_meta.outputs.name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download EIF artifact
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          name: ${{ inputs.enclave_artifact_name }}
+          path: artifacts/${{ inputs.enclave_artifact_name }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build image
+        id: build
+        uses: docker/bake-action@82490499d2e5613fcead7e128237ef0b0ea210f7 # v7.0.0
+        with:
+          source: .
+          files: docker-bake.hcl
+          targets: signer-with-enclave
+          set: |
+            signer-with-enclave.platform=linux/amd64
+            signer-with-enclave.tags=
+            signer-with-enclave.output=type=oci,tar=false,dest=./oci-image
+        env:
+          BUILDX_NO_DEFAULT_ATTESTATIONS: 1
+          CI: true
+          ENCLAVE_EIF: artifacts/${{ inputs.enclave_artifact_name }}/${{ inputs.enclave_file }}
+          ENCLAVE_PCR0: ${{ inputs.enclave_pcr0 }}
+          ENCLAVE_PCR1: ${{ inputs.enclave_pcr1 }}
+          ENCLAVE_PCR2: ${{ inputs.enclave_pcr2 }}
+
+      - name: Trivy vulnerability scan
+        env:
+          TRIVY_IMAGE: aquasec/trivy:0.71.2@sha256:f5d0e600ecda7449e2a9b272805aef698631d3bb3f3a739a750de2c6819acdc9
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            "${TRIVY_IMAGE}" image \
+              --input /workspace/oci-image \
+              --format sarif \
+              --output /workspace/trivy-results.sarif \
+              --severity CRITICAL \
+              --ignore-unfixed \
+              --exit-code 1
+
+      - name: Upload Trivy scan results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: trivy-signer-with-enclave
+          path: trivy-results.sarif
+
+      - name: Record docker archive artifact name
+        id: archive_meta
+        run: echo "name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+        env:
+          ARTIFACT_NAME: ${{ inputs.docker_archive_artifact_name }}
+
+      - name: Export docker archive for smoke validation
+        if: ${{ inputs.docker_archive_artifact_name != '' }}
+        run: |
+          skopeo copy \
+            "oci:./oci-image" \
+            "docker-archive:./signer-with-enclave.tar:nitro-enclave-signer/signer-with-enclave:smoke"
+
+      - name: Upload docker archive artifact
+        if: ${{ inputs.docker_archive_artifact_name != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ inputs.docker_archive_artifact_name }}
+          path: signer-with-enclave.tar
+          compression-level: 0
+          retention-days: 1

@@ -13,7 +13,6 @@
 
 //go:generate mockgen -source=awskms.go -destination=awskms_mock.go -package=awskms
 
-// Package awskms implement crypto provider interface.
 package awskms
 
 import (
@@ -21,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -30,6 +30,7 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
+	"github.com/circlefin/arc-remote-signer/internal/common/byteproxy"
 	"github.com/circlefin/arc-remote-signer/internal/common/logging"
 )
 
@@ -42,6 +43,19 @@ func getLogger() *logging.Logger {
 	_logger = logging.Get("awskms.provider")
 	return _logger
 }
+
+// ErrInvalidARN marks a configured KMS ARN that is syntactically parseable but
+// not a usable KMS key ARN (wrong service or missing region). The enclave
+// service maps this class of error to codes.InvalidArgument.
+var ErrInvalidARN = errors.New("invalid kms key arn")
+
+// ErrInvalidRegion marks a host-supplied AWS region that fails validation.
+// The enclave service maps this error to codes.InvalidArgument.
+var ErrInvalidRegion = errors.New("invalid AWS region")
+
+// ErrAttestationDocumentRequired marks an attempt to construct a Nitro KMS
+// provider without an enclave attestation document.
+var ErrAttestationDocumentRequired = errors.New("attestation document is required in Nitro mode")
 
 // Provider is the interface for the aws kms provider.
 type Provider interface {
@@ -62,20 +76,45 @@ type provider struct {
 	mu sync.Mutex
 }
 
-// New function Init the provider with specific config and return the instance.
-func New(ctx context.Context, cfg *Config, awsCfg aws.Config, attestationDocument []byte) (Provider, error) {
-	clients, err := initClients(awsCfg, cfg.Arns, time.Duration(cfg.ConnectTimeout)*time.Millisecond)
+// NewWithAttestation constructs a provider that asks KMS to encrypt data keys
+// for the attested enclave.
+func NewWithAttestation(
+	ctx context.Context,
+	cfg *Config,
+	awsCfg aws.Config,
+	attestationDocument []byte,
+) (Provider, error) {
+	if len(attestationDocument) == 0 {
+		return nil, ErrAttestationDocumentRequired
+	}
+
+	return newProvider(ctx, cfg, awsCfg, &types.RecipientInfo{
+		AttestationDocument:    attestationDocument,
+		KeyEncryptionAlgorithm: types.KeyEncryptionMechanismRsaesOaepSha256,
+	})
+}
+
+// NewForDevelopment constructs a provider for development environments where
+// KMS returns plaintext data keys without enclave attestation.
+func NewForDevelopment(ctx context.Context, cfg *Config, awsCfg aws.Config) (Provider, error) {
+	return newProvider(ctx, cfg, awsCfg, nil)
+}
+
+func newProvider(
+	ctx context.Context,
+	cfg *Config,
+	awsCfg aws.Config,
+	recipient *types.RecipientInfo,
+) (Provider, error) {
+	clients, err := initClients(
+		awsCfg,
+		cfg.Arns,
+		time.Duration(cfg.ConnectTimeout)*time.Millisecond,
+		cfg.AwsproxyEndpoint,
+	)
 	if err != nil {
 		getLogger().WarnErr(ctx, "initClients failed", err, nil)
 		return nil, err
-	}
-
-	var recipient *types.RecipientInfo
-	if len(attestationDocument) > 0 {
-		recipient = &types.RecipientInfo{
-			AttestationDocument:    attestationDocument,
-			KeyEncryptionAlgorithm: types.KeyEncryptionMechanismRsaesOaepSha256,
-		}
 	}
 
 	provider := &provider{
@@ -163,7 +202,12 @@ func (p *provider) GenerateDataKey(ctx context.Context) (plainDataKey, cipherDat
 }
 
 // initClients will create a clients slice for each valid ARN and return if there is an invalid arn.
-func initClients(cfg aws.Config, arns []string, timeout time.Duration) (clients []*client, err error) {
+func initClients(
+	cfg aws.Config,
+	arns []string,
+	timeout time.Duration,
+	awsproxyEndpoint string,
+) (clients []*client, err error) {
 	// precheck arns
 	if len(arns) == 0 {
 		return nil, errors.New("there is no arn")
@@ -189,11 +233,31 @@ func initClients(cfg aws.Config, arns []string, timeout time.Duration) (clients 
 	for i, arn := range arns {
 		region, err := extractRegionFromKmsKeyArn(arn)
 		if err != nil {
-			return nil, fmt.Errorf("invalid arn(arn_%v))", i+1)
+			return nil, fmt.Errorf("invalid arn_%d: %w: %w", i+1, ErrInvalidARN, err)
 		}
 
 		c := cfg.Copy()
 		c.Region = region
+		var tlsServerName string
+		if c.BaseEndpoint == nil {
+			endpoint, err := canonicalKMSEndpoint(region)
+			if err != nil {
+				return nil, fmt.Errorf("build KMS endpoint for arn_%d: %w", i+1, err)
+			}
+			c.BaseEndpoint = aws.String(endpoint.String())
+			tlsServerName = endpoint.Hostname()
+		}
+		if awsproxyEndpoint != "" {
+			route := byteproxy.AWSRoute{
+				Service: "kms",
+				Region:  region,
+			}
+			httpClient, err := newAwsproxyHTTPClient(awsproxyEndpoint, &route, tlsServerName)
+			if err != nil {
+				return nil, fmt.Errorf("build awsproxy HTTP client for arn_%d: %w", i+1, err)
+			}
+			c.HTTPClient = httpClient
+		}
 		clients = append(clients, &client{
 			Client: kms.NewFromConfig(c, opts...),
 			arn:    arn,
@@ -208,7 +272,50 @@ func extractRegionFromKmsKeyArn(arnStr string) (string, error) {
 		getLogger().WarnErr(context.Background(), "arn.Parse failed", err, nil)
 		return "", err
 	}
+	if arnObj.Partition != "aws" {
+		return "", fmt.Errorf("ARN partition %q is not supported", arnObj.Partition)
+	}
+	if arnObj.Service != "kms" {
+		return "", fmt.Errorf("ARN service %q is not KMS", arnObj.Service)
+	}
+	if arnObj.Region == "" {
+		return "", errors.New("KMS ARN has no region")
+	}
+	if err := validateKMSRegion(arnObj.Region); err != nil {
+		return "", err
+	}
 	return arnObj.Region, nil
+}
+
+func validateKMSRegion(region string) error {
+	if len(region) == 0 || len(region) > 63 {
+		return errors.New("KMS ARN region length must be between 1 and 63 characters")
+	}
+	if region[0] == '-' || region[len(region)-1] == '-' {
+		return fmt.Errorf("KMS ARN region %q must not start or end with a hyphen", region)
+	}
+	for _, ch := range region {
+		if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' {
+			return fmt.Errorf("KMS ARN region %q contains an invalid character", region)
+		}
+	}
+	return nil
+}
+
+func canonicalKMSEndpoint(region string) (*url.URL, error) {
+	if err := validateKMSRegion(region); err != nil {
+		return nil, err
+	}
+	hostname := "kms." + region + ".amazonaws.com"
+	endpoint, err := url.Parse("https://" + hostname)
+	if err != nil {
+		return nil, fmt.Errorf("parse canonical KMS endpoint: %w", err)
+	}
+	if endpoint.Scheme != "https" || endpoint.User != nil || endpoint.Fragment != "" ||
+		endpoint.Hostname() != hostname {
+		return nil, errors.New("canonical KMS endpoint has invalid URL components")
+	}
+	return endpoint, nil
 }
 
 // WithTimeout returns a function that sets a custom timeout for the KMS client.

@@ -8,20 +8,20 @@ Secure cryptographic signing service for Arc Chain validators, powered by AWS Ni
 
 ## Overview
 
-Arc Remote Signer is a gRPC microservice designed specifically for Arc Chain validators, providing cryptographic key generation and signing operations with hardware-level security guarantees from AWS Nitro Enclaves. The service implements a dual-process architecture where a Proxy (outside the enclave) handles incoming requests while the Enclave (inside Nitro Enclave) performs all cryptographic operations.
+Arc Remote Signer is a gRPC microservice designed specifically for Arc Chain validators, providing cryptographic key generation and signing operations with hardware-level security guarantees from AWS Nitro Enclaves. The service runs as three runtime processes across two trust domains: a host application and standalone KMS traffic proxy outside the enclave, plus the signing application inside the Nitro Enclave.
 
-Traditional key management systems store private keys in memory, making them vulnerable to compromise from privileged users, malware, or system vulnerabilities. Arc Remote Signer addresses these risks by isolating all cryptographic operations inside an AWS Nitro Enclave—a hardware-backed trusted execution environment with cryptographic attestation capabilities.
+Host-based signing services expose private keys to the host process's memory, where privileged access, malware, or system vulnerabilities can compromise them. Arc Remote Signer instead isolates private-key operations inside an AWS Nitro Enclave—a hardware-backed trusted execution environment with cryptographic attestation capabilities.
 
-Deployed as a 1-to-1 sidecar alongside Arc Chain validator nodes, Arc Remote Signer provides verifiable proof that signing operations occur within a secure enclave, enabling zero-trust architectures where even the host system cannot access private key material.
+Deployed as a 1-to-1 sidecar alongside Arc Chain validator nodes, Arc Remote Signer uses enclave attestation to bind KMS access to an approved enclave image, so the host system cannot access plaintext private keys or data keys.
 
 ## Features
 
 - 🔐 **Hardware-isolated operations** - Validator key operations isolated in AWS Nitro Enclaves
 - 🔑 **Ed25519 signatures** - Primary signing algorithm for Arc Chain validators with BLS support
-- 📜 **Cryptographic attestation** - Verifiable proof of enclave execution for validator operations
-- 🔄 **Envelope encryption** - Four-layer key protection (validator key → data key → KMS key → enclave key)
+- 📜 **Cryptographic attestation** - Attestation-bound KMS access for approved enclave images
+- 🔄 **Envelope encryption** - Private keys wrapped by KMS-protected data keys, with attestation-bound KMS responses decryptable only inside the enclave
 - 🚀 **High-performance gRPC** - Efficient binary protocol for low-latency validator signing
-- 📊 **Full observability** - OpenTelemetry tracing, Datadog metrics, and an optional Prometheus endpoint
+- 📊 **Host observability** - OpenTelemetry tracing, Datadog metrics, and an optional Prometheus endpoint for the host application
 - 🏗️ **Sidecar architecture** - 1-to-1 deployment alongside Arc Chain validator nodes
 - ✅ **Comprehensive testing** - Unit, integration, and smoke test coverage
 
@@ -63,13 +63,13 @@ If all tests pass, the service is ready to use!
 
 ## Documentation
 
-- [`docs/architecture.md`](./docs/architecture.md) — dual-process architecture, runtime flows, security model, deployment, API reference, troubleshooting
+- [`docs/architecture.md`](./docs/architecture.md) — runtime processes and trust domains, runtime flows, security model, deployment, API reference, troubleshooting
 - [`docs/development.md`](./docs/development.md) — prerequisites, build/run commands, coding conventions, pre-commit hooks
 - [`docs/testing.md`](./docs/testing.md) — test matrix and conventions
 
 ## Architecture
 
-Arc Remote Signer uses a **dual-process architecture** with clear security boundaries between the Proxy (outside enclave) and Enclave (inside Nitro Enclave):
+Arc Remote Signer uses **three runtime processes across two trust domains**: the host application and standalone `app run-vsockproxy` process run on the EC2 host, while the enclave application runs inside the Nitro Enclave:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -78,16 +78,16 @@ Arc Remote Signer uses a **dual-process architecture** with clear security bound
                             │ gRPC (sidecar)
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                      Proxy (Host)                           │
+│                        EC2 Host                             │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
-│  │   gRPC API   │  │   Signer     │  │  Providers   │       │
-│  │   Handlers   │─▶│   Service    │─▶│ (KMS, Secrets│       │
-│  └──────────────┘  └──────────────┘  │  Manager)    │       │
-│                            │         └──────────────┘       │
-│                            │ vsock/gRPC                     │
-└────────────────────────────┼────────────────────────────────┘
-                             │
-                ┌────────────▼────────────┐
+│  │   gRPC API   │  │   Signer     │  │   Secrets    │       │
+│  │   Handlers   │─▶│   Service    │─▶│   Manager    │       │
+│  └──────────────┘  └──────────────┘  └──────────────┘       │
+│       Host app (`app run`) │                                │
+│                            │ gRPC: TCP (dev/CI), VSOCK (prod)│
+└───────────────────────────┼─────────────────────────────────┘
+                            │
+                ┌───────────▼─────────────┐
                 │   Nitro Enclave         │
                 │  ┌──────────────────┐   │
                 │  │  Enclave gRPC    │   │
@@ -95,23 +95,30 @@ Arc Remote Signer uses a **dual-process architecture** with clear security bound
                 │  └────────┬─────────┘   │
                 │           │             │
                 │  ┌────────▼─────────┐   │
-                │  │  Key Decryption  │   │
-                │  │  & Signing       │   │
+                │  │  KMS Client, Key │   │
+                │  │ Decrypt & Signing│   │
                 │  └────────┬─────────┘   │
                 │           │             │
                 │  ┌────────▼─────────┐   │
-                │  │  NSM Attestation │   │
+                │  │ NSM + awsproxy   │   │
                 │  └──────────────────┘   │
                 └─────────────────────────┘
+                            │ KMS traffic
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ EC2 Host: standalone `app run-vsockproxy` process ───▶ KMS │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Components
 
-1. **Proxy** (`internal/app/`) - Runs outside the enclave, handles validator signing requests, manages AWS integrations (KMS for key decryption, Secrets Manager for configuration), caches attestation documents, and proxies signing operations to the enclave over vsock.
+1. **Host application** (`app run`, `internal/app/`) - Runs outside the enclave, handles validator requests, persists the wrapped key in AWS Secrets Manager, and passes temporary AWS credentials, KMS key ARNs, and the LocalStack selector during enclave initialization. It does not construct KMS requests, handle plaintext data keys, or fetch/cache attestation documents.
 
-2. **Enclave** (`internal/enclave/`) - Runs inside an AWS Nitro Enclave, performs all cryptographic operations (key decryption, validator signing), maintains secure key material in memory, and generates attestation documents proving execution within the secure environment.
+2. **KMS traffic proxy** (`app run-vsockproxy`, `internal/vsockproxy/`) - Runs as a separate host-side process. It routes opaque KMS traffic to LocalStack or to the regional AWS endpoint selected by the enclave. It restricts AWS routes to the regions in the configured KMS key ARNs.
 
-3. **Communication Layer** - Proxy and enclave communicate via gRPC over vsock (virtual socket), ensuring type-safe, versioned contracts between trust boundaries. Validator nodes communicate with the Proxy via standard gRPC.
+3. **Enclave application** (`internal/enclave/`) - Runs inside an AWS Nitro Enclave, owns the AWS KMS client, attaches NSM-signed attestation to KMS requests, and routes them through the enclave-side `awsproxy`. It performs data-key and signing-key operations and keeps plaintext key material in enclave memory.
+
+4. **Communication layer** - The host and enclave applications use gRPC over TCP on localhost in dev/CI and over VSOCK in Nitro production. Validator nodes communicate with the host application via standard gRPC.
 
 For detailed layer architecture and shared infrastructure, see [`docs/architecture.md`](./docs/architecture.md).
 
@@ -176,16 +183,18 @@ func main() {
 }
 ```
 
+The example uses the default plaintext listener for local development. Production can enable server-authenticated TLS with the `APP_PUBLIC_SERVER_TLS_ENABLED`, `APP_PUBLIC_SERVER_TLS_CERT`, and `APP_PUBLIC_SERVER_TLS_KEY` settings documented in [`docs/architecture.md`](./docs/architecture.md#common-production-settings). It can optionally require client certificates by enabling `APP_PUBLIC_SERVER_TLS_CLIENTAUTH_ENABLED` and configuring `APP_PUBLIC_SERVER_TLS_CLIENTAUTH_CA` with a dedicated client CA bundle. The application authenticates membership in that CA; restricting access to Malachite depends on provisioning its client certificates exclusively to that workload.
+
 ### EnclaveService API (Internal)
 
-**EnclaveService** is an **internal API** inside the Nitro Enclave, **not accessible to external clients**:
+**EnclaveService** is an **internal API** served inside the Nitro Enclave. It is not exposed as a validator-facing network API:
 
-- **Port**: 10350 (internal vsock only, accessible only by Proxy)
+- **Port**: 10350 (TCP on localhost in dev/CI; VSOCK in Nitro production)
 - **Proto**: `proto/arc/enclave/v1/enclave.proto`
-- **Methods**: `GenerateKey()`, `GetPublicKey()`, `SignMessage()`, `GetAttestation()`
-- **Use case**: Internal communication between Proxy and Enclave over vsock
+- **Methods**: `Initialize()`, `GenerateKey()`, `GetPublicKey()`, `SignMessage()`
+- **Use case**: Internal communication between the host and enclave applications
 
-This full-featured API is used exclusively by the Proxy to communicate with the Enclave for cryptographic operations. Arc Chain validators do not interact with this API directly. The EnclaveService handles key generation, encrypted key material management, signing operations, and attestation document generation—all within the secure enclave environment.
+The host application calls this API over TCP in dev/CI or VSOCK in Nitro production; Arc Chain validators do not interact with it directly. Attestation remains enclave-local and is attached to KMS requests by the enclave-owned KMS client.
 
 ## Deployment
 
@@ -195,7 +204,43 @@ Arc Remote Signer is deployed as a 1-to-1 sidecar with Arc Chain validator nodes
 
 The enclave Docker image is built reproducibly — identical source produces bit-for-bit identical images across builds. This ensures the PCR0 hash (derived from the enclave image) is stable and predictable, which is critical for attestation policy.
 
-The enclave build uses a dedicated `docker/Dockerfile.enclave`, separate from the main `docker/Dockerfile` used by the signer targets. Key techniques:
+The enclave build uses `docker/Dockerfile.enclave`. This build uses the
+`prod` tag. The tag selects the Nitro runner and the VSOCK transport. The final
+image contains only the enclave executable, `configs/enclave.yaml`, and the
+startup script.
+
+A `go list -deps` test examines the dependencies of `cmd/enclave`. The test fails if `cmd/enclave` imports the generic command package or a host-only dependency that is in the test list.
+
+The signer targets use `docker/Dockerfile`. The production targets build the
+host with the `prod` tag. This tag sets the host transport to
+VSOCK and disables LocalStack. The production image contains only the
+production host executable and production configuration. The production
+launcher always starts the VSOCK proxy, the EIF, and the host application.
+
+Local development and CI use the `signer-dev` target. This target uses the
+development host build and the development enclave build. It supports TCP and
+LocalStack. The production targets do not contain its executable, configuration,
+or startup script.
+
+Production uses one enclave target and one EIF. The build configuration has no
+debug EIF target.
+The EIF does not read `APP_ENV` or Datadog variables from the host. It does not
+send logs, traces, or metrics to the host. The enclave launcher sends standard
+output and standard error to `/dev/null`.
+
+The `signer-dev` image is not an EIF. It can show local enclave process logs for
+development. It does not have the security boundary of the production EIF.
+
+The release pipeline does a test of the `signer-with-enclave` Docker archive on
+a Nitro runner. The test starts the EIF with Nitro debug mode. Debug mode is a
+runtime option. It does not create or change EIF bytes. The pipeline publishes
+the same image digest to Cloudsmith and ECR. Staging and production must use
+that digest.
+
+Nitro debug mode does not validate a production KMS policy that uses PCR values.
+A production-mode test is necessary for each PCR policy change.
+
+Key reproducibility techniques:
 - **Digest-pinned base images** (Go toolchain + Debian)
 - **Snapshot-pinned apt** via `snapshot.debian.org` for deterministic packages
 - **In-Docker Go build** with `-trimpath -buildvcs=false -ldflags=-buildid=`
@@ -223,12 +268,14 @@ This project uses `make` targets as the standard workflow entry points. For full
 │   ├── app/               # Proxy (outside enclave)
 │   │   ├── public/        # gRPC handlers
 │   │   ├── service/       # Business logic
-│   │   └── provider/      # AWS integrations (KMS, Secrets Manager)
+│   │   └── provider/      # Secrets Manager and enclave client
 │   ├── enclave/           # Enclave (inside Nitro Enclave)
 │   │   ├── public/        # Enclave gRPC handlers
 │   │   ├── service/       # Enclave business logic
-│   │   └── provider/      # Key storage, attestation
+│   │   └── provider/      # KMS, key storage, attestation
+│   ├── vsockproxy/        # Host-side vsock↔AWS KMS bridge (run-vsockproxy)
 │   ├── common/            # Shared infrastructure
+│   │   ├── byteproxy/     # vsock byte proxy + AWS route framing
 │   │   ├── crypto/        # AES, random generation
 │   │   ├── grpc/          # gRPC client/server/interceptors
 │   │   ├── logging/       # Structured logging
@@ -297,7 +344,7 @@ This project was developed by the Circle engineering team.
 
 **AWS Nitro Enclaves Documentation**:
 - [AWS Nitro Enclaves](https://docs.aws.amazon.com/enclaves/latest/user/nitro-enclave.html)
-- [Nitro System Manager Documentation](https://docs.aws.amazon.com/enclaves/latest/user/set-up-nitro-enclave-dev-environment.html)
+- [Nitro Enclaves development environment](https://docs.aws.amazon.com/enclaves/latest/user/set-up-nitro-enclave-dev-environment.html)
 - [Attestation Document Format](https://docs.aws.amazon.com/enclaves/latest/user/verify-root.html)
 
 **Cryptography References**:

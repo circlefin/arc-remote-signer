@@ -68,6 +68,11 @@ func (suite *TestSuite) TestPublicKey() {
 	suite.Require().NoError(err, "PublicKey endpoint failed")
 	suite.Require().NotNil(result, "PublicKey response is nil")
 	suite.Require().NotEmpty(result.PublicKey, "PublicKey is empty")
+	if expectNitroAttestation {
+		suite.Require().NotEmpty(result.AttestationDocument, "Attestation document is empty")
+	} else {
+		suite.Require().Empty(result.AttestationDocument, "Attestation document is not empty")
+	}
 }
 
 // TestSign tests the Sign gRPC endpoint.

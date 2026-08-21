@@ -14,19 +14,11 @@
 package app
 
 import (
-	"context"
-	"errors"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awsSdkConfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/circlefin/arc-remote-signer/internal/app/provider/awskms"
 	enclave "github.com/circlefin/arc-remote-signer/internal/app/provider/enclave"
 	"github.com/circlefin/arc-remote-signer/internal/app/provider/secrets"
 	"github.com/circlefin/arc-remote-signer/internal/app/service/signer"
 	"github.com/circlefin/arc-remote-signer/internal/common/config"
 	grpcServer "github.com/circlefin/arc-remote-signer/internal/common/grpc/server"
-	"github.com/circlefin/arc-remote-signer/internal/common/logging"
 	"github.com/circlefin/arc-remote-signer/internal/common/metric"
 	"github.com/circlefin/arc-remote-signer/internal/common/telemetry"
 )
@@ -75,13 +67,27 @@ type ServiceConfig struct {
 type ProviderConfig struct {
 	Secrets *secrets.Config
 	Enclave *enclave.ProviderConfig
-	AWSKMS  *awskms.Config
+	AWSKMS  *AWSKMSConfig
 }
 
-// NewConfig returns a new Config with default dev (non-prod) environment.
-func NewConfig() *Config {
+// AWSKMSConfig contains the KMS settings that the host sends to the enclave.
+type AWSKMSConfig struct {
+	Localstack *AWSKMSLocalstackConfig `json:"localstack" mapstructure:"localstack"`
+	Arns       []string                `json:"arns" mapstructure:"arns"`
+}
+
+// AWSKMSLocalstackConfig selects LocalStack as the KMS backend.
+type AWSKMSLocalstackConfig struct {
+	Enabled bool `json:"enabled" mapstructure:"enabled"`
+}
+
+func newConfig(
+	baseConfig *config.BaseConfig,
+	secretsConfig *secrets.Config,
+	awsKMSConfig *AWSKMSConfig,
+) *Config {
 	return &Config{
-		BaseConfig: config.NewBaseConfig(),
+		BaseConfig: baseConfig,
 		Public: &PublicConfig{
 			Server: &grpcServer.Config{
 				Host: "0.0.0.0",
@@ -100,43 +106,9 @@ func NewConfig() *Config {
 			Signer: signer.NewConfig(),
 		},
 		Provider: &ProviderConfig{
-			Secrets: secrets.NewConfig(),
+			Secrets: secretsConfig,
 			Enclave: enclave.NewProviderConfig(),
-			AWSKMS:  awskms.NewProviderConfig(),
+			AWSKMS:  awsKMSConfig,
 		},
 	}
-}
-
-// MergeAwsConfigWithLocalstack will generate final awsConfig according endpoint and region in secrets config.
-// If LocalstackEndpoint is empty in config, it will use default config of aws.
-func MergeAwsConfigWithLocalstack(cfg *Config) (aws.Config, error) {
-	awsEndpoint := cfg.Provider.Secrets.Localstack.Endpoint
-	awsRegion := cfg.Provider.Secrets.Localstack.Region
-
-	configOptions := []func(*awsSdkConfig.LoadOptions) error{}
-	if awsRegion != "" {
-		configOptions = append(configOptions, awsSdkConfig.WithRegion(awsRegion))
-	}
-	if awsEndpoint != "" {
-		configOptions = append(configOptions, awsSdkConfig.WithBaseEndpoint(awsEndpoint))
-		// Localstack does not validate credentials; inject static credentials to prevent
-		// the SDK from attempting EC2 IMDS discovery in environments without AWS access.
-		configOptions = append(configOptions, awsSdkConfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
-	}
-
-	return awsSdkConfig.LoadDefaultConfig(context.Background(), configOptions...)
-}
-
-func retrieveAWSConfig(ctx context.Context, cfg *Config, logger *logging.Logger) (aws.Config, error) {
-	if cfg.BaseConfig == nil || cfg.Provider.Secrets == nil || cfg.Provider.Secrets.Localstack == nil {
-		return aws.Config{}, errors.New("secrets config unavailable")
-	}
-
-	if (cfg.Env == config.Dev || cfg.Env == config.QA) &&
-		(cfg.Provider.Secrets.Localstack.Enabled && cfg.Provider.Secrets.Localstack.Endpoint != "") {
-		logger.Info(ctx, "Using localstack aws config...", nil)
-		return MergeAwsConfigWithLocalstack(cfg)
-	}
-	logger.Info(ctx, "Using standard aws config...", nil)
-	return awsSdkConfig.LoadDefaultConfig(ctx)
 }

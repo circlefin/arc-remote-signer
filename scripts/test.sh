@@ -7,6 +7,12 @@ BASE_DIR="$(dirname "$0")"
 
 cd "$PROJECT_DIR" || exit
 
+bash "${BASE_DIR}/test-ci-shell.sh"
+bash "${BASE_DIR}/test-dev-image.sh"
+bash "${BASE_DIR}/test-production-image.sh"
+bash "${BASE_DIR}/test-production-coverage.sh"
+bash "${BASE_DIR}/test-secure-eif.sh"
+
 # shellcheck disable=SC2039
 case $OSTYPE in
   linux* )
@@ -58,6 +64,17 @@ TEST_RESULTS_DIR=test_results
 mkdir -p ${TEST_RESULTS_DIR}
 
 golangci-lint run --config "${PROJECT_DIR}/build/golangci.yaml"
+# Run a separate lint pass for the production build tag.
+if [ "$PLATFORM" = "linux" ]; then
+  golangci-lint run --config "${PROJECT_DIR}/build/golangci.yaml" \
+    --build-tags=prod "${PROJECT_DIR}/..."
+else
+  golangci-lint run --config "${PROJECT_DIR}/build/golangci.yaml" \
+    --build-tags=prod \
+    "${PROJECT_DIR}/internal/app/..." \
+    "${PROJECT_DIR}/internal/vsockproxy/..." \
+    "${PROJECT_DIR}/cmd/..."
+fi
 
 if [ "${RUN_IT_TESTS:-false}" = true ]; then
   # count=1 ensures tests are not cached; helpful if making non src code changes that may affect the test.
@@ -76,6 +93,21 @@ if [ $exit_code -ne 0 ]; then
   echo "exit on code ${exit_code}"
   exit $exit_code
 fi
+
+# Production app files use a mutually exclusive build tag. Add files that are
+# present only in the production package to the default profile.
+prod_exit=0
+go test -tags=prod -coverprofile="${COVERAGE_DIR}/prod_raw.out" "${PROJECT_DIR}/internal/app" || prod_exit=$?
+go test -tags=prod "${PROJECT_DIR}/internal/vsockproxy" "${PROJECT_DIR}/internal/enclave" || prod_exit=$?
+CGO_ENABLED=0 go test -tags=prod "${PROJECT_DIR}/cmd/enclave" || prod_exit=$?
+if [ $prod_exit -ne 0 ]; then
+  echo "Production tests failed with exit code ${prod_exit}."
+  exit $prod_exit
+fi
+bash "${BASE_DIR}/merge-production-coverage.sh" \
+  "${COVERAGE_DIR}/coverage.out" \
+  "${COVERAGE_DIR}/prod_raw.out" \
+  'internal/app/'
 
 # Run go-ignore-cov to process coverage ignore post processing
 # If no coverage to ignore, there are no changes to the coverage file.

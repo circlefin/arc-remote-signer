@@ -16,11 +16,8 @@ package app
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/circlefin/arc-remote-signer/internal/app/metrics"
-	"github.com/circlefin/arc-remote-signer/internal/app/provider/awskms"
-	enclaveProvider "github.com/circlefin/arc-remote-signer/internal/app/provider/enclave"
 	"github.com/circlefin/arc-remote-signer/internal/app/provider/secrets"
 	"github.com/circlefin/arc-remote-signer/internal/app/public"
 	"github.com/circlefin/arc-remote-signer/internal/app/service/signer"
@@ -28,7 +25,6 @@ import (
 	"github.com/circlefin/arc-remote-signer/internal/common/logging"
 	"github.com/circlefin/arc-remote-signer/internal/common/metric"
 	"github.com/circlefin/arc-remote-signer/internal/common/telemetry"
-	"github.com/circlefin/arc-remote-signer/proto/pb"
 	"gopkg.in/DataDog/dd-trace-go.v1/profiler"
 )
 
@@ -50,6 +46,7 @@ func getLogger() *logging.Logger {
 
 // Run the application.
 func Run(cfg *Config) {
+	applyBuildPolicy(cfg)
 	ctx := context.Background()
 	logger := getLogger()
 
@@ -81,7 +78,7 @@ func Run(cfg *Config) {
 	}
 
 	logger.Info(ctx, "initializing the providers...", nil)
-	enclavePvd, conn, err := enclaveProvider.New(cfg.Provider.Enclave)
+	enclavePvd, conn, err := newRuntimeEnclave(cfg.Provider.Enclave)
 	if err != nil {
 		logger.ErrorErr(ctx, "failed to initialize the enclave provider", err, nil)
 		panic(err)
@@ -92,28 +89,36 @@ func Run(cfg *Config) {
 		}
 	}()
 
-	logger.Info(ctx, "getting the attestation document from the enclave...", nil)
-	attestationDocument, err := getAttestationDocument(ctx, enclavePvd, cfg)
-	if err != nil {
-		logger.ErrorErr(ctx, "failed to get attestation document", err, nil)
-		panic(err)
-	}
-
 	logger.Info(ctx, "initializing the AWS providers...", nil)
-	awsConfig, err := retrieveAWSConfig(ctx, cfg, getLogger())
+	awsConfig, err := loadRuntimeAWSConfig(ctx, cfg, getLogger())
 	if err != nil {
 		logger.ErrorErr(ctx, "failed to retrieve the AWS config", err, nil)
 		panic(err)
 	}
-	secretPvd := secrets.New(awsConfig)
-	awskmsPvd, err := awskms.New(ctx, cfg.Provider.AWSKMS, awsConfig, attestationDocument)
-	if err != nil {
-		logger.ErrorErr(ctx, "failed to initialize the aws kms provider", err, nil)
+
+	// Initialize also serves as the enclave reachability check: its in-enclave
+	// KMS probe (a GenerateDataKey through awsproxy) fails if the enclave is
+	// unreachable or the credentials/ARNs are misconfigured.
+	logger.Info(ctx, "initializing the enclave via Initialize RPC...", nil)
+	if err := initializeEnclave(
+		ctx,
+		enclavePvd,
+		awsConfig,
+		cfg.Provider.AWSKMS.Arns,
+		cfg.Provider.AWSKMS.Localstack.Enabled,
+		logger,
+	); err != nil {
+		logger.ErrorErr(ctx, "failed to initialize the enclave", err, nil)
 		panic(err)
 	}
 
+	// awsConfig keeps its credentials provider here for host-side Secrets
+	// Manager access; KMS is now handled in-enclave. Full credential
+	// zeroization lands when the Secrets Manager fetch also migrates.
+	secretPvd := secrets.New(awsConfig)
+
 	logger.Info(ctx, "initializing the services...", nil)
-	signerSvc, err := signer.New(ctx, cfg.Provider.Enclave.NitroEnclave.Enabled, cfg.Service.Signer, secretPvd, enclavePvd, awskmsPvd)
+	signerSvc, err := signer.New(ctx, cfg.Service.Signer, secretPvd, enclavePvd)
 	if err != nil {
 		logger.ErrorErr(ctx, "failed to initialize the signer service", err, nil)
 		panic(err)
@@ -174,15 +179,4 @@ func initializeMetricsProviders(ctx context.Context, metricsCfg *metric.Config) 
 		api:        metric.NewAPIStatsServiceImpl(statsService, metric.WithDistributionsOption(metric.DistributionsEnabled)),
 		prometheus: prometheusProvider,
 	}
-}
-
-func getAttestationDocument(ctx context.Context, enclavePvd pb.EnclaveServiceClient, cfg *Config) ([]byte, error) {
-	if cfg.Provider.Enclave.NitroEnclave.Enabled {
-		resp, err := enclavePvd.GetAttestation(ctx, &pb.GetAttestationRequest{})
-		if err != nil {
-			return nil, fmt.Errorf("failed to get attestation document: %w", err)
-		}
-		return resp.AttestationDocument, nil
-	}
-	return nil, nil
 }

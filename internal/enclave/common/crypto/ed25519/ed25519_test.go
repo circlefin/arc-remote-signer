@@ -16,6 +16,7 @@ package ed25519
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/hex"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
@@ -178,6 +179,20 @@ func (s *ed25519TestSuite) TestVerifySignedMessage() {
 
 	s.Run("valid signature verification", func() {
 		valid, err := VerifySignedMessage(signature, message, publicKey)
+		s.NoError(err)
+		s.True(valid)
+	})
+
+	s.Run("ZIP-215 signature rejected by standard verifier", func() {
+		// Vector 2 from ed25519consensus v0.2.0's ZIP-215 test suite.
+		zip215PublicKey, err := hex.DecodeString("0100000000000000000000000000000000000000000000000000000000000000")
+		s.Require().NoError(err)
+		zip215Signature, err := hex.DecodeString("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a0000000000000000000000000000000000000000000000000000000000000000")
+		s.Require().NoError(err)
+		zip215Message := []byte("Zcash")
+
+		s.False(ed25519.Verify(zip215PublicKey, zip215Message, zip215Signature))
+		valid, err := VerifySignedMessage(zip215Signature, zip215Message, zip215PublicKey)
 		s.NoError(err)
 		s.True(valid)
 	})

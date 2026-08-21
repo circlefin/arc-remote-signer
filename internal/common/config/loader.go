@@ -60,7 +60,7 @@ func LoadConfig(cfg ApplicationConfig, cfgFile string) {
 			log.Fatalf("Unable to parse config file: %v", err)
 		}
 		if cfgFile != "" {
-			log.Printf("Warning: specified config file not found: %v", err)
+			log.Fatalf("Specified config file could not be loaded: %v", err)
 		}
 	}
 

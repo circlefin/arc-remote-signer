@@ -11,36 +11,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package signer
+//go:build !prod
 
-import (
-	"sync"
+package main
 
-	"github.com/circlefin/arc-remote-signer/proto/pb"
-)
+import "github.com/circlefin/arc-remote-signer/internal/enclave"
 
-type cache struct {
-	mu  sync.RWMutex
-	key *key
-}
-
-type key struct {
-	encryptedKeyMaterial *pb.EncryptedKeyMaterial
-	publicKey            []byte
-}
-
-func newCache() *cache {
-	return &cache{}
-}
-
-func (c *cache) set(k *key) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.key = k
-}
-
-func (c *cache) get() *key {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.key
+func runConfiguredEnclave(cfg *enclave.Config) error {
+	return enclave.Run(cfg)
 }

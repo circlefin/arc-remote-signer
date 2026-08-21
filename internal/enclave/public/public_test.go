@@ -20,14 +20,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/circlefin/arc-remote-signer/internal/common/config"
 	grpcServer "github.com/circlefin/arc-remote-signer/internal/common/grpc/server"
 	"github.com/circlefin/arc-remote-signer/proto/pb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	grpcHealth "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 )
 
 func TestNew_ReturnsRunnableWithServiceName(t *testing.T) {
@@ -38,7 +39,6 @@ func TestNew_ReturnsRunnableWithServiceName(t *testing.T) {
 
 	runnable, err := New(cfg, CreateServerParams{
 		ServiceName:         "enclave.public",
-		Env:                 config.Dev,
 		EnclaveService:      &pb.UnimplementedEnclaveServiceServer{},
 		NitroEnclaveEnabled: false,
 	})
@@ -55,7 +55,6 @@ func TestNew_ReturnsErrorWhenPortIsInvalid(t *testing.T) {
 
 	runnable, err := New(cfg, CreateServerParams{
 		ServiceName:         "enclave.public",
-		Env:                 config.Dev,
 		EnclaveService:      &pb.UnimplementedEnclaveServiceServer{},
 		NitroEnclaveEnabled: false,
 	})
@@ -83,7 +82,6 @@ func TestServer_StartsAndAcceptsConnections(t *testing.T) {
 
 	runnable, err := New(cfg, CreateServerParams{
 		ServiceName:         "enclave.public",
-		Env:                 config.Dev,
 		EnclaveService:      &pb.UnimplementedEnclaveServiceServer{},
 		NitroEnclaveEnabled: false,
 	})
@@ -127,5 +125,94 @@ func TestServer_StartsAndAcceptsConnections(t *testing.T) {
 		require.NoError(t, err, "server returned error")
 	case <-time.After(2 * time.Second):
 		require.Fail(t, "server did not stop after shutdown")
+	}
+}
+
+// TestServer_Initialize_ProtovalidateRejectsMalformedRequests verifies the
+// protovalidate interceptor wired up in New rejects malformed
+// InitializeRequest payloads with InvalidArgument before the handler's
+// Unimplemented path runs. This covers the interceptor wiring itself; the
+// handler-level behaviour is covered by the service package tests.
+func TestServer_Initialize_ProtovalidateRejectsMalformedRequests(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := listener.Addr().String()
+	_, portStr, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	require.NoError(t, listener.Close())
+
+	port, err := strconv.Atoi(portStr)
+	require.NoError(t, err)
+
+	cfg := &grpcServer.Config{
+		Host: "127.0.0.1",
+		Port: port,
+	}
+
+	runnable, err := New(cfg, CreateServerParams{
+		ServiceName:         "enclave.public",
+		EnclaveService:      &pb.UnimplementedEnclaveServiceServer{},
+		NitroEnclaveEnabled: false,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, runnable)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- runnable.Run()
+	}()
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := runnable.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("failed to shutdown server: %v", err)
+		}
+		select {
+		case err := <-serverErr:
+			if err != nil {
+				t.Errorf("server returned error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("server did not stop after shutdown")
+		}
+	})
+
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err, "failed to create client")
+	t.Cleanup(func() { assert.NoError(t, conn.Close()) })
+
+	client := pb.NewEnclaveServiceClient(conn)
+
+	tests := map[string]struct {
+		req *pb.InitializeRequest
+	}{
+		"NilCredentials": {
+			req: &pb.InitializeRequest{},
+		},
+		"EmptySessionToken": {
+			req: &pb.InitializeRequest{
+				Credentials: &pb.AwsCredentials{
+					AccessKeyId:     "AKIA-test",
+					SecretAccessKey: "secret",
+					SessionToken:    "",
+					Region:          "us-east-1",
+				},
+			},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			resp, err := client.Initialize(ctx, tt.req)
+			require.Error(t, err)
+			require.Nil(t, resp)
+			st, ok := status.FromError(err)
+			require.True(t, ok, "error must be a gRPC status")
+			require.Equal(t, codes.InvalidArgument, st.Code(),
+				"protovalidate interceptor must reject malformed request with InvalidArgument")
+		})
 	}
 }
