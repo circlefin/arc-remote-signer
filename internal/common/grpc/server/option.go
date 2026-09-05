@@ -14,9 +14,14 @@
 package server
 
 import (
+	"bytes"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"log"
 	"net"
+	"os"
 
 	"github.com/mdlayher/vsock"
 	"google.golang.org/grpc"
@@ -84,16 +89,77 @@ func WithHealthServer(serviceNames ...string) RunnableOption {
 
 // WithTLS creates a TLS server option from the given TLS configuration.
 func WithTLS(cfg *TLSConfig) ([]grpc.ServerOption, error) {
-	if cfg != nil && cfg.Enabled {
-		if cfg.Cert == "" || cfg.Key == "" {
-			return nil, fmt.Errorf("TLS is enabled but cert/key paths are not configured")
-		}
-		log.Printf("loading TLS config for gRPC server")
-		creds, err := credentials.NewServerTLSFromFile(cfg.Cert, cfg.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load TLS credentials: %w", err)
-		}
-		return []grpc.ServerOption{grpc.Creds(creds)}, nil
+	if cfg == nil {
+		return []grpc.ServerOption{}, nil
 	}
-	return []grpc.ServerOption{}, nil
+	if !cfg.Enabled {
+		if cfg.ClientAuth.Enabled {
+			return nil, fmt.Errorf("TLS client authentication requires TLS to be enabled")
+		}
+		return []grpc.ServerOption{}, nil
+	}
+	if cfg.Cert == "" || cfg.Key == "" {
+		return nil, fmt.Errorf("TLS is enabled but cert/key paths are not configured")
+	}
+	if cfg.ClientAuth.Enabled && cfg.ClientAuth.CA == "" {
+		return nil, fmt.Errorf("TLS client authentication is enabled but CA path is not configured")
+	}
+
+	certificate, err := tls.LoadX509KeyPair(cfg.Cert, cfg.Key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load TLS credentials: %w", err)
+	}
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{certificate},
+		MinVersion:   tls.VersionTLS12,
+	}
+
+	if cfg.ClientAuth.Enabled {
+		clientCAPEM, err := os.ReadFile(cfg.ClientAuth.CA)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read TLS client CA: %w", err)
+		}
+		clientCAs, err := certPoolFromPEM(clientCAPEM)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse TLS client CA %q: %w", cfg.ClientAuth.CA, err)
+		}
+		tlsConfig.ClientCAs = clientCAs
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+
+	log.Printf(
+		"loaded TLS config for gRPC server (client authentication enabled=%t)",
+		cfg.ClientAuth.Enabled,
+	)
+	return []grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsConfig))}, nil
+}
+
+func certPoolFromPEM(data []byte) (*x509.CertPool, error) {
+	certPool := x509.NewCertPool()
+	remaining := bytes.TrimSpace(data)
+	certificateCount := 0
+
+	for len(remaining) > 0 {
+		if !bytes.HasPrefix(remaining, []byte("-----BEGIN CERTIFICATE-----")) {
+			return nil, fmt.Errorf("bundle contains invalid PEM data")
+		}
+
+		block, rest := pem.Decode(remaining)
+		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			return nil, fmt.Errorf("bundle contains an invalid certificate PEM block")
+		}
+		certificate, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("bundle contains an invalid certificate: %w", err)
+		}
+
+		certPool.AddCert(certificate)
+		certificateCount++
+		remaining = bytes.TrimSpace(rest)
+	}
+
+	if certificateCount == 0 {
+		return nil, fmt.Errorf("bundle contains no certificates")
+	}
+	return certPool, nil
 }

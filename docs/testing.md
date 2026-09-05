@@ -8,15 +8,47 @@ For the contribution workflow that wraps these commands, see [development.md](de
 
 | Command | Scope | Notes |
 |---------|-------|-------|
-| `make test` | Unit tests + lint | — |
+| `make test` | Unit tests + lint | Also checks development and production image contracts |
 | `make test-it` | Unit + integration | Starts localstack via `make up` |
 | `make smoke` | Smoke (end-to-end) | Starts localstack and launches `bin/app` automatically (via `scripts/smoke.sh`) |
-| `make test-all` | All of the above | Combines the above |
+| `make test-all` | All local test targets | Combines the above; does not include CI Nitro EIF image validation |
 
 Test files are co-located with source and use build tags to control scope:
 
-- Integration tests: `//go:build integration` (files named `integration_test.go`)
+- Integration tests: `//go:build integration` (files named `*_integration_test.go`, e.g. `awskms_integration_test.go`)
 - Smoke tests: `//go:build smoke`, located in `internal/smoke/`
+
+## CI-only EIF Image Validation
+
+The PR pipeline conditionally runs `smoke_eif` when signer image or runtime
+inputs change, or when the `build-docker` label is present. The job downloads
+the built `signer-with-enclave` Docker archive. It runs `scripts/smoke-eif.sh` on
+a Nitro runner. The script checks the configured image entry point and the
+production files in the image. It also checks that development files and
+settings are absent. The CI-only wrapper then starts the same `docker/run.sh`
+launcher with conflicting development settings. The smoke test includes image
+startup, VSOCK communication, KMS recipient encryption, and signing.
+
+The test uses a CI-only shell wrapper to add the Nitro CLI `--debug-mode` option.
+The production launcher does not accept this option. Debug mode does not change
+the EIF bytes or create a second EIF. The test does not validate a production
+KMS policy that uses PCR values. A production-mode test is necessary for each
+PCR policy change.
+
+For an internal release, the pipeline runs the same test on the
+`signer-with-enclave` Docker archive. The pipeline publishes the Docker archive
+only after this test passes. It pushes the same digest to Cloudsmith and ECR.
+Staging and production must use this digest.
+
+The public mirror does not publish the Docker archive. Its release workflow
+runs the public CI tests before it syncs the source to
+`circlefin/arc-remote-signer`.
+
+No local `make` target includes this validation because it requires a Nitro
+device, the CI AWS role, and the built image artifact. `make smoke` and
+`make test-all` use the local LocalStack-based flow instead. When `smoke_eif` is
+selected for a PR, its result is included in the merge-blocking required-checks
+rollup.
 
 ## Conventions
 
@@ -25,7 +57,7 @@ Test files are co-located with source and use build tags to control scope:
 - `testify/require` by default; use `require` for preconditions and dependency checks (`NoError`, `NotNil`, etc.).
 - `testify/assert` only when intentionally collecting multiple independent failures in one run.
 - `testify/suite` only when shared setup/teardown across many tests is genuinely needed.
-- The `no-go-testing` pre-commit hook forbids raw `testing` assertions — use `testify`.
+- Testify is repository policy. The pinned `no-go-testing` pre-commit hook scans files named `test_*.go` for the literal `testing.T`; it does not parse imports, enforce assertion style, or match standard `*_test.go` filenames.
 
 ### Naming
 
@@ -67,7 +99,7 @@ Test files are co-located with source and use build tags to control scope:
 
 - Tests must be deterministic and reproducible.
 - Avoid real wall clock, real network, and external services in unit tests.
-- For async coordination, use channels, context deadlines, or bounded polling — never fixed `time.Sleep`.
+- New or modified tests should use channels, context deadlines, or bounded polling for async coordination rather than fixed `time.Sleep`. Some legacy tests still contain bounded sleeps; replace them when touched where practical.
 
 ### State Safety
 

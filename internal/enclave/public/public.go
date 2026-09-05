@@ -18,7 +18,6 @@ import (
 	"fmt"
 
 	"buf.build/go/protovalidate"
-	"github.com/circlefin/arc-remote-signer/internal/common/config"
 	grpcserver "github.com/circlefin/arc-remote-signer/internal/common/grpc/server"
 	"github.com/circlefin/arc-remote-signer/internal/common/lifecycle"
 	"github.com/circlefin/arc-remote-signer/proto/pb"
@@ -29,7 +28,6 @@ import (
 // CreateServerParams is a param struct passed in to create a new public server.
 type CreateServerParams struct {
 	ServiceName         string
-	Env                 config.Environment
 	EnclaveService      pb.EnclaveServiceServer
 	NitroEnclaveEnabled bool
 }
@@ -43,7 +41,6 @@ func New(cfg *grpcserver.Config, params CreateServerParams) (lifecycle.Runnable,
 
 	grpcServer := grpcserver.NewServer(grpcserver.RequiredEngineParams{
 		ServiceName:     params.ServiceName,
-		Env:             params.Env,
 		APIStatsService: nil,
 		UnaryInterceptors: []grpc.UnaryServerInterceptor{
 			protovalidatemw.UnaryServerInterceptor(validator),

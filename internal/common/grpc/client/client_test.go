@@ -18,6 +18,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -32,17 +33,25 @@ type testHealthServer struct {
 	calls                int
 	failUntil            int
 	blockUntilCtxTimeout bool
+	responseDelay        time.Duration
 }
 
 func (s *testHealthServer) Check(ctx context.Context, _ *grpcHealthV1.HealthCheckRequest) (*grpcHealthV1.HealthCheckResponse, error) {
-	if s.blockUntilCtxTimeout {
-		<-ctx.Done()
-		return nil, status.Error(codes.DeadlineExceeded, ctx.Err().Error())
-	}
 	s.mu.Lock()
 	s.calls++
 	current := s.calls
 	s.mu.Unlock()
+	if s.responseDelay > 0 {
+		select {
+		case <-time.After(s.responseDelay):
+		case <-ctx.Done():
+			return nil, status.Error(codes.DeadlineExceeded, ctx.Err().Error())
+		}
+	}
+	if s.blockUntilCtxTimeout {
+		<-ctx.Done()
+		return nil, status.Error(codes.DeadlineExceeded, ctx.Err().Error())
+	}
 	if current <= s.failUntil {
 		return nil, status.Error(codes.Unavailable, "temporary unavailable")
 	}
@@ -164,4 +173,130 @@ func TestNewInsecureClientConnCustomRetryCodes(t *testing.T) {
 	_, err = client.Check(context.Background(), &grpcHealthV1.HealthCheckRequest{})
 	require.Equal(t, codes.Unavailable, status.Code(err), "expected unavailable")
 	require.Equal(t, 1, svc.Calls(), "expected 1 attempt")
+}
+
+func TestNewInsecureClientConn_MethodTimeoutOverridesDefault(t *testing.T) {
+	svc := &testHealthServer{blockUntilCtxTimeout: true}
+	addr, stop := startHealthServer(t, svc)
+	defer stop()
+
+	conn, err := NewInsecureClientConn(addr, Config{
+		RequestTimeoutMS: 5000,
+		Methods: map[string]MethodConfig{
+			"Check": {TimeoutMS: 10},
+		},
+		Retry: &RetryConfig{MaxAttempts: 0},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := grpcHealthV1.NewHealthClient(conn)
+	start := time.Now()
+	_, err = client.Check(context.Background(), &grpcHealthV1.HealthCheckRequest{})
+
+	require.Equal(t, codes.DeadlineExceeded, status.Code(err))
+	require.Less(t, time.Since(start), time.Second)
+}
+
+func TestNewInsecureClientConn_PreservesShorterCallerDeadline(t *testing.T) {
+	svc := &testHealthServer{blockUntilCtxTimeout: true}
+	addr, stop := startHealthServer(t, svc)
+	defer stop()
+
+	conn, err := NewInsecureClientConn(addr, Config{
+		RequestTimeoutMS: 5000,
+		Methods: map[string]MethodConfig{
+			"Check": {TimeoutMS: 5000},
+		},
+		Retry: &RetryConfig{MaxAttempts: 0},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := grpcHealthV1.NewHealthClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = client.Check(ctx, &grpcHealthV1.HealthCheckRequest{})
+
+	require.Equal(t, codes.DeadlineExceeded, status.Code(err))
+	require.Less(t, time.Since(start), time.Second)
+}
+
+func TestNewInsecureClientConn_MethodTimeoutCanExceedDefault(t *testing.T) {
+	svc := &testHealthServer{responseDelay: 30 * time.Millisecond}
+	addr, stop := startHealthServer(t, svc)
+	defer stop()
+
+	conn, err := NewInsecureClientConn(addr, Config{
+		RequestTimeoutMS: 10,
+		Methods: map[string]MethodConfig{
+			"Check": {TimeoutMS: 100},
+		},
+		Retry: &RetryConfig{MaxAttempts: 1},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := grpcHealthV1.NewHealthClient(conn)
+	_, err = client.Check(context.Background(), &grpcHealthV1.HealthCheckRequest{})
+
+	require.NoError(t, err)
+	require.Equal(t, 1, svc.Calls())
+}
+
+func TestNewInsecureClientConn_RetriesShareMethodTimeout(t *testing.T) {
+	svc := &testHealthServer{failUntil: 10, responseDelay: 20 * time.Millisecond}
+	addr, stop := startHealthServer(t, svc)
+	defer stop()
+
+	conn, err := NewInsecureClientConn(addr, Config{
+		RequestTimeoutMS: 1000,
+		Methods: map[string]MethodConfig{
+			"Check": {TimeoutMS: 80},
+		},
+		Retry: &RetryConfig{MaxAttempts: 3},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := grpcHealthV1.NewHealthClient(conn)
+	start := time.Now()
+	_, err = client.Check(context.Background(), &grpcHealthV1.HealthCheckRequest{})
+
+	require.Equal(t, codes.DeadlineExceeded, status.Code(err))
+	require.Less(t, time.Since(start), 150*time.Millisecond)
+}
+
+func TestNewInsecureClientConn_MethodMaxAttemptsOverridesDefault(t *testing.T) {
+	svc := &testHealthServer{failUntil: 10}
+	addr, stop := startHealthServer(t, svc)
+	defer stop()
+
+	conn, err := NewInsecureClientConn(addr, Config{
+		RequestTimeoutMS: 1000,
+		Methods: map[string]MethodConfig{
+			"Check": {TimeoutMS: 1000, MaxAttempts: 1},
+		},
+		Retry: &RetryConfig{MaxAttempts: 3},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := grpcHealthV1.NewHealthClient(conn)
+	_, err = client.Check(context.Background(), &grpcHealthV1.HealthCheckRequest{})
+
+	require.Equal(t, codes.Unavailable, status.Code(err))
+	require.Equal(t, 1, svc.Calls())
+}
+
+func TestResolveMethodTimeout_MatchesLowercaseConfigKey(t *testing.T) {
+	cfg := Config{
+		RequestTimeoutMS: 10,
+		Methods: map[string]MethodConfig{
+			"check": {TimeoutMS: 100},
+		},
+	}
+
+	require.Equal(t, 100*time.Millisecond, resolveMethodTimeout(cfg, "/grpc.health.v1.Health/Check"))
 }

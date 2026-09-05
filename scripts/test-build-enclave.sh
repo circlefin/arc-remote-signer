@@ -18,10 +18,27 @@ get_image_id() {
     docker inspect --format '{{.Id}}' "${TAG}"
 }
 
+verify_image_contents() {
+    docker run --rm --entrypoint /bin/sh "${TAG}" -eu -c '
+        test -x /usr/local/circle/enclave
+        test ! -e /usr/local/circle/app
+        test -f /usr/local/circle/configs/enclave.yaml
+        test ! -e /usr/local/circle/configs/app.yaml
+        test ! -e /usr/local/circle/configs/.env.dev
+        ! command -v socat >/dev/null 2>&1
+        grep -q "/usr/local/circle/enclave" /usr/local/circle/run_enclave.sh
+        grep -q "exec >/dev/null 2>&1" /usr/local/circle/run_enclave.sh
+        ! grep -Eq "APP_ENV|DD_|OTEL|VSOCK-CONNECT|LOG_FIFO" /usr/local/circle/run_enclave.sh
+        ! grep -q "run-enclave" /usr/local/circle/run_enclave.sh
+    '
+}
+
 echo "==> Build 1..."
 build_enclave
 ID1=$(get_image_id)
 echo "    ID: ${ID1}"
+echo "==> Verifying enclave-only image contents..."
+verify_image_contents
 
 echo "==> Pruning BuildKit cache..."
 docker builder prune -af >/dev/null 2>&1

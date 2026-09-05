@@ -8,6 +8,8 @@ import (
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
+	request "github.com/hf/nsm/request"
+	response "github.com/hf/nsm/response"
 )
 
 // MockProvider is a mock of Provider interface.
@@ -33,18 +35,34 @@ func (m *MockProvider) EXPECT() *MockProviderMockRecorder {
 	return m.recorder
 }
 
-// AttestationDocument mocks base method.
-func (m *MockProvider) AttestationDocument() []byte {
+// Attest mocks base method.
+func (m *MockProvider) Attest(userData []byte) ([]byte, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "AttestationDocument")
+	ret := m.ctrl.Call(m, "Attest", userData)
 	ret0, _ := ret[0].([]byte)
-	return ret0
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
-// AttestationDocument indicates an expected call of AttestationDocument.
-func (mr *MockProviderMockRecorder) AttestationDocument() *gomock.Call {
+// Attest indicates an expected call of Attest.
+func (mr *MockProviderMockRecorder) Attest(userData interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AttestationDocument", reflect.TypeOf((*MockProvider)(nil).AttestationDocument))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Attest", reflect.TypeOf((*MockProvider)(nil).Attest), userData)
+}
+
+// AttestKMSRecipient mocks base method.
+func (m *MockProvider) AttestKMSRecipient() ([]byte, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AttestKMSRecipient")
+	ret0, _ := ret[0].([]byte)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// AttestKMSRecipient indicates an expected call of AttestKMSRecipient.
+func (mr *MockProviderMockRecorder) AttestKMSRecipient() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AttestKMSRecipient", reflect.TypeOf((*MockProvider)(nil).AttestKMSRecipient))
 }
 
 // DecryptKMSEnvelopedKey mocks base method.
@@ -60,4 +78,56 @@ func (m *MockProvider) DecryptKMSEnvelopedKey(ciphertext []byte) ([]byte, error)
 func (mr *MockProviderMockRecorder) DecryptKMSEnvelopedKey(ciphertext interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DecryptKMSEnvelopedKey", reflect.TypeOf((*MockProvider)(nil).DecryptKMSEnvelopedKey), ciphertext)
+}
+
+// MocknsmSession is a mock of nsmSession interface.
+type MocknsmSession struct {
+	ctrl     *gomock.Controller
+	recorder *MocknsmSessionMockRecorder
+}
+
+// MocknsmSessionMockRecorder is the mock recorder for MocknsmSession.
+type MocknsmSessionMockRecorder struct {
+	mock *MocknsmSession
+}
+
+// NewMocknsmSession creates a new mock instance.
+func NewMocknsmSession(ctrl *gomock.Controller) *MocknsmSession {
+	mock := &MocknsmSession{ctrl: ctrl}
+	mock.recorder = &MocknsmSessionMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MocknsmSession) EXPECT() *MocknsmSessionMockRecorder {
+	return m.recorder
+}
+
+// Close mocks base method.
+func (m *MocknsmSession) Close() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Close")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Close indicates an expected call of Close.
+func (mr *MocknsmSessionMockRecorder) Close() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MocknsmSession)(nil).Close))
+}
+
+// Send mocks base method.
+func (m *MocknsmSession) Send(arg0 request.Request) (response.Response, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Send", arg0)
+	ret0, _ := ret[0].(response.Response)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Send indicates an expected call of Send.
+func (mr *MocknsmSessionMockRecorder) Send(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Send", reflect.TypeOf((*MocknsmSession)(nil).Send), arg0)
 }

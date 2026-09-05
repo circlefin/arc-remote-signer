@@ -14,6 +14,8 @@
 package enclave
 
 import (
+	"time"
+
 	"github.com/circlefin/arc-remote-signer/internal/common/grpc/client"
 )
 
@@ -22,34 +24,71 @@ const providerName = "enclave"
 // enclaveDefaultURL is the default dev URL for the enclave.
 const enclaveDefaultURL = "localhost:10350"
 
-// enclaveDefaultCID is the default CID for the enclave.
-// https://github.com/circlefin/arc-remote-signer/blob/master/docker/run.sh#L6
+// enclaveDefaultCID is the development default. The production policy pins it.
 const enclaveDefaultCID = 16
+
+const (
+	defaultSignMessageTimeoutMS = 500
+	defaultStartupTimeoutMS     = 30000
+)
 
 // ProviderConfig contains configuration for the enclave gRPC provider.
 type ProviderConfig struct {
-	NitroEnclave *NitroEnclave
-	Client       *client.Config
+	NitroEnclave     *NitroEnclave  `json:"nitroEnclave" mapstructure:"nitroEnclave"`
+	Client           *client.Config `json:"client" mapstructure:"client"`
+	StartupTimeoutMS int            `json:"startupTimeoutMS" mapstructure:"startupTimeoutMS"`
 }
 
 // NitroEnclave contains config for the Nitro Enclave.
 type NitroEnclave struct {
 	Enabled bool
-	// CID is the context ID of the enclave (typically 16 for first enclave).
+	// CID is the context ID of the enclave.
 	CID uint32
 	// Port is the VSOCK port the enclave listens on.
 	Port uint32
 }
 
+// DefaultMethodTimeouts returns default method timeouts for enclave client RPCs.
+func DefaultMethodTimeouts() map[string]client.MethodConfig {
+	return map[string]client.MethodConfig{
+		"initialize": {
+			TimeoutMS:   defaultStartupTimeoutMS,
+			MaxAttempts: 1,
+		},
+		"generatekey": {
+			TimeoutMS:   defaultStartupTimeoutMS,
+			MaxAttempts: 1,
+		},
+		"getpublickey": {
+			TimeoutMS: defaultStartupTimeoutMS,
+		},
+		"signmessage": {
+			TimeoutMS:   defaultSignMessageTimeoutMS,
+			MaxAttempts: 1,
+		},
+	}
+}
+
+// StartupTimeout returns the total budget for host-side enclave initialization.
+func (c *ProviderConfig) StartupTimeout() time.Duration {
+	if c != nil && c.StartupTimeoutMS > 0 {
+		return time.Duration(c.StartupTimeoutMS) * time.Millisecond
+	}
+	return time.Duration(defaultStartupTimeoutMS) * time.Millisecond
+}
+
 // NewProviderConfig provides a new provider config with defaults.
 func NewProviderConfig() *ProviderConfig {
 	cfg := client.NewClientConfig(providerName, enclaveDefaultURL)
+	cfg.RequestTimeoutMS = defaultSignMessageTimeoutMS
+	cfg.Methods = DefaultMethodTimeouts()
 	return &ProviderConfig{
 		NitroEnclave: &NitroEnclave{
 			Enabled: false,
 			CID:     enclaveDefaultCID,
 			Port:    10350,
 		},
-		Client: cfg,
+		Client:           cfg,
+		StartupTimeoutMS: defaultStartupTimeoutMS,
 	}
 }

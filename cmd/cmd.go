@@ -19,15 +19,12 @@ import (
 	"os"
 
 	"github.com/circlefin/arc-remote-signer/internal/app"
-	"github.com/circlefin/arc-remote-signer/internal/enclave"
 	"github.com/spf13/cobra"
 )
 
 var (
-	cfgFile   string
-	neCfgFile string
-	cfg       *app.Config
-	neCfg     *enclave.Config
+	cfgFile string
+	cfg     *app.Config
 
 	rootCmd = &cobra.Command{
 		Use:   "app",
@@ -40,8 +37,7 @@ var (
 )
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (by default looks for ./app.yaml, ./configs/app.yaml, or /etc/app/app.yaml)")
-	rootCmd.PersistentFlags().StringVar(&neCfgFile, "enclave-config", "", "enclave config file (by default looks for ./enclave.yaml, ./configs/enclave.yaml, or /etc/app/enclave.yaml)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: config.yaml in . or ./configs)")
 }
 
 // Execute is the primary entrypoint for the app.

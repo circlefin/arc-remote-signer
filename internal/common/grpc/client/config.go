@@ -26,12 +26,24 @@ var defaultRetryCodes = []codes.Code{
 	codes.Internal,
 }
 
+// MethodConfig contains per-RPC outbound gRPC settings.
+// TimeoutMS > 0 sets the RPC timeout in milliseconds.
+// TimeoutMS == 0 inherits the global RequestTimeoutMS.
+// TimeoutMS < 0 disables automatic timeout injection for this RPC.
+// MaxAttempts > 0 overrides the global retry attempt limit.
+// MaxAttempts == 0 inherits the global retry attempt limit.
+type MethodConfig struct {
+	TimeoutMS   int  `json:"timeoutMS" mapstructure:"timeoutMS"`
+	MaxAttempts uint `json:"maxAttempts" mapstructure:"maxAttempts"`
+}
+
 // Config contains outbound gRPC settings.
 type Config struct {
-	Name             string
-	BaseURL          string
-	RequestTimeoutMS int
-	Retry            *RetryConfig
+	Name             string                  `json:"name" mapstructure:"name"`
+	BaseURL          string                  `json:"baseURL" mapstructure:"baseURL"`
+	RequestTimeoutMS int                     `json:"requestTimeoutMS" mapstructure:"requestTimeoutMS"`
+	Retry            *RetryConfig            `json:"retry" mapstructure:"retry"`
+	Methods          map[string]MethodConfig `json:"methods" mapstructure:"methods"`
 }
 
 // RetryConfig contains outbound gRPC retry settings.
