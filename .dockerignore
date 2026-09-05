@@ -6,6 +6,7 @@
 coverage/
 test_results/
 logs/
+bin/
 artifacts/
 !artifacts/nitro-enclave-image/
 deploy/

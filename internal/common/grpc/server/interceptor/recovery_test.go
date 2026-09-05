@@ -37,7 +37,6 @@ func TestRecoveryWithLogger(t *testing.T) {
 		expectedResp   interface{}
 		expectedError  error
 		expectPanic    bool
-		panicValue     interface{}
 		checkGRPCError bool
 		expectCode     codes.Code
 	}{
@@ -61,7 +60,6 @@ func TestRecoveryWithLogger(t *testing.T) {
 			name:        "Panic Recovery with String",
 			req:         "test request",
 			expectPanic: true,
-			panicValue:  "test panic",
 			handler: func(_ context.Context, _ interface{}) (interface{}, error) {
 				panic("test panic")
 			},
@@ -72,7 +70,6 @@ func TestRecoveryWithLogger(t *testing.T) {
 			name:        "Panic Recovery with Nil",
 			req:         "test request",
 			expectPanic: true,
-			panicValue:  nil,
 			handler: func(_ context.Context, _ interface{}) (interface{}, error) {
 				panic(nil)
 			},
@@ -83,13 +80,6 @@ func TestRecoveryWithLogger(t *testing.T) {
 			name:        "Panic Recovery with Struct",
 			req:         "test request",
 			expectPanic: true,
-			panicValue: struct {
-				Message string
-				Code    int
-			}{
-				Message: "structured panic",
-				Code:    500,
-			},
 			handler: func(_ context.Context, _ interface{}) (interface{}, error) {
 				panic(struct {
 					Message string
@@ -106,7 +96,6 @@ func TestRecoveryWithLogger(t *testing.T) {
 			name:        "Panic Recovery with Error",
 			req:         "test request",
 			expectPanic: true,
-			panicValue:  errors.New("panic error"),
 			handler: func(_ context.Context, _ interface{}) (interface{}, error) {
 				panic(errors.New("panic error"))
 			},
@@ -117,14 +106,6 @@ func TestRecoveryWithLogger(t *testing.T) {
 			name:        "Broken Pipe Panic",
 			req:         "test request",
 			expectPanic: true,
-			panicValue: &net.OpError{
-				Op:  "write",
-				Net: "tcp",
-				Err: &os.SyscallError{
-					Syscall: "write",
-					Err:     errors.New("broken pipe"),
-				},
-			},
 			handler: func(_ context.Context, _ interface{}) (interface{}, error) {
 				panic(&net.OpError{
 					Op:  "write",
@@ -145,14 +126,6 @@ func TestRecoveryWithLogger(t *testing.T) {
 			name:        "Connection Reset Panic",
 			req:         "test request",
 			expectPanic: true,
-			panicValue: &net.OpError{
-				Op:  "write",
-				Net: "tcp",
-				Err: &os.SyscallError{
-					Syscall: "write",
-					Err:     errors.New("connection reset by peer"),
-				},
-			},
 			handler: func(_ context.Context, _ interface{}) (interface{}, error) {
 				panic(&net.OpError{
 					Op:  "write",
@@ -229,12 +202,7 @@ func TestRecoveryWithLogger(t *testing.T) {
 					if tc.expectCode == codes.Unavailable {
 						assert.Contains(t, st.Message(), "connection closed")
 					} else {
-						assert.Contains(t, st.Message(), "something went wrong")
-
-						// Check panic value in error message if it's a string
-						if panicStr, ok := tc.panicValue.(string); ok {
-							assert.Contains(t, st.Message(), panicStr)
-						}
+						assert.Equal(t, "something went wrong", st.Message())
 					}
 				}
 			} else if tc.expectedError != nil {

@@ -16,14 +16,13 @@ package app
 
 import (
 	"context"
-	"fmt"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/circlefin/arc-remote-signer/internal/app/metrics"
-	"github.com/circlefin/arc-remote-signer/internal/app/provider/awskms"
 	enclaveProvider "github.com/circlefin/arc-remote-signer/internal/app/provider/enclave"
 	"github.com/circlefin/arc-remote-signer/internal/app/provider/secrets"
 	"github.com/circlefin/arc-remote-signer/internal/app/public"
-	"github.com/circlefin/arc-remote-signer/internal/app/service/signer"
+	signerv1 "github.com/circlefin/arc-remote-signer/internal/app/service/signer/v1"
 	"github.com/circlefin/arc-remote-signer/internal/common/lifecycle"
 	"github.com/circlefin/arc-remote-signer/internal/common/logging"
 	"github.com/circlefin/arc-remote-signer/internal/common/metric"
@@ -50,6 +49,7 @@ func getLogger() *logging.Logger {
 
 // Run the application.
 func Run(cfg *Config) {
+	applyBuildPolicy(cfg)
 	ctx := context.Background()
 	logger := getLogger()
 
@@ -81,7 +81,7 @@ func Run(cfg *Config) {
 	}
 
 	logger.Info(ctx, "initializing the providers...", nil)
-	enclavePvd, conn, err := enclaveProvider.New(cfg.Provider.Enclave)
+	enclavePvd, conn, err := newRuntimeEnclave(cfg.Provider.Enclave)
 	if err != nil {
 		logger.ErrorErr(ctx, "failed to initialize the enclave provider", err, nil)
 		panic(err)
@@ -92,28 +92,25 @@ func Run(cfg *Config) {
 		}
 	}()
 
-	logger.Info(ctx, "getting the attestation document from the enclave...", nil)
-	attestationDocument, err := getAttestationDocument(ctx, enclavePvd, cfg)
-	if err != nil {
-		logger.ErrorErr(ctx, "failed to get attestation document", err, nil)
-		panic(err)
-	}
-
 	logger.Info(ctx, "initializing the AWS providers...", nil)
-	awsConfig, err := retrieveAWSConfig(ctx, cfg, getLogger())
+	awsConfig, err := loadRuntimeAWSConfig(ctx, cfg, getLogger())
 	if err != nil {
 		logger.ErrorErr(ctx, "failed to retrieve the AWS config", err, nil)
 		panic(err)
 	}
+
 	secretPvd := secrets.New(awsConfig)
-	awskmsPvd, err := awskms.New(ctx, cfg.Provider.AWSKMS, awsConfig, attestationDocument)
-	if err != nil {
-		logger.ErrorErr(ctx, "failed to initialize the aws kms provider", err, nil)
-		panic(err)
-	}
+	initializeKey := newInitializeKeyFunc(
+		cfg.Provider.Enclave,
+		enclavePvd,
+		awsConfig,
+		cfg.Provider.AWSKMS.Arns,
+		cfg.Provider.AWSKMS.Localstack.Enabled,
+		logger,
+	)
 
 	logger.Info(ctx, "initializing the services...", nil)
-	signerSvc, err := signer.New(ctx, cfg.Provider.Enclave.NitroEnclave.Enabled, cfg.Service.Signer, secretPvd, enclavePvd, awskmsPvd)
+	signerSvc, err := signerv1.New(ctx, cfg.Service.Signer, secretPvd, enclavePvd, initializeKey)
 	if err != nil {
 		logger.ErrorErr(ctx, "failed to initialize the signer service", err, nil)
 		panic(err)
@@ -153,6 +150,33 @@ func Run(cfg *Config) {
 	lc.Run()
 }
 
+func newInitializeKeyFunc(
+	cfg *enclaveProvider.ProviderConfig,
+	enclavePvd pb.EnclaveServiceClient,
+	awsConfig aws.Config,
+	kmsKeyArns []string,
+	kmsLocalstackEnabled bool,
+	logger *logging.Logger,
+) func(context.Context, *pb.SecretEnvelope, pb.Algorithm) (*pb.InitializeResponse, error) {
+	return func(
+		ctx context.Context,
+		existingKey *pb.SecretEnvelope,
+		generateNew pb.Algorithm,
+	) (*pb.InitializeResponse, error) {
+		startupCtx, cancel := context.WithTimeout(ctx, cfg.StartupTimeout())
+		defer cancel()
+		return initializeEnclave(
+			startupCtx,
+			enclavePvd,
+			awsConfig,
+			kmsKeyArns,
+			kmsLocalstackEnabled,
+			enclaveKeySource{existingKey: existingKey, generateNew: generateNew},
+			logger,
+		)
+	}
+}
+
 func initializeMetricsProviders(ctx context.Context, metricsCfg *metric.Config) metricProviders {
 	if metricsCfg == nil {
 		panic("metrics config unavailable")
@@ -174,15 +198,4 @@ func initializeMetricsProviders(ctx context.Context, metricsCfg *metric.Config) 
 		api:        metric.NewAPIStatsServiceImpl(statsService, metric.WithDistributionsOption(metric.DistributionsEnabled)),
 		prometheus: prometheusProvider,
 	}
-}
-
-func getAttestationDocument(ctx context.Context, enclavePvd pb.EnclaveServiceClient, cfg *Config) ([]byte, error) {
-	if cfg.Provider.Enclave.NitroEnclave.Enabled {
-		resp, err := enclavePvd.GetAttestation(ctx, &pb.GetAttestationRequest{})
-		if err != nil {
-			return nil, fmt.Errorf("failed to get attestation document: %w", err)
-		}
-		return resp.AttestationDocument, nil
-	}
-	return nil, nil
 }
