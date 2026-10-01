@@ -20,7 +20,7 @@ services:
     ulimits:
       memlock: -1
     ports:
-      - "10350:10350"
+      - "127.0.0.1:10350:10350"
     healthcheck:
       test: ["CMD", "grpc_health_probe", "-addr=127.0.0.1:10350", "-service=arc.enclave.v1.EnclaveService"]
       <<: *health-retry
@@ -40,12 +40,16 @@ services:
       - "127.0.0.1:4510-4559:4510-4559"  # external services port range
     environment:
       DEBUG: ${DEBUG-}
-      DOCKER_HOST: unix:///var/run/docker.sock
       LOCALSTACK_HOST: localstack
       LOCALSTACK_PORT: 4566
     volumes:
       - "${LOCALSTACK_VOLUME_DIR:-./volume}:/var/lib/localstack"
-      - "/var/run/docker.sock:/var/run/docker.sock"
+      # Security fix: `/var/run/docker.sock` was bind-mounted into the LocalStack container,
+      # which grants it full control of the host Docker daemon - effectively root on the host.
+      # LocalStack only needs the daemon to run Lambda, which this compose file does not enable,
+      # and it executes repo-supplied `./localstack_scripts/*.sh` at startup, so any change to
+      # those scripts escalated to host root. The socket mount is not required for KMS/Secrets
+      # Manager emulation and has been removed.
       - "./localstack_scripts/create-kms-keys.sh:/etc/localstack/init/ready.d/create-kms-keys.sh" # runs script when localstack is ready
       - "./localstack_scripts/create-secret-manager-key.sh:/etc/localstack/init/ready.d/create-secret-manager-key.sh" # runs script when localstack is ready
       - './localstack_scripts/health-check.sh:/opt/health-check.sh' # health check script

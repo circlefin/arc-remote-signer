@@ -47,6 +47,8 @@ RUN --mount=type=bind,from=build-base,source=/etc/ssl/certs,target=/etc/ssl/cert
     apt-get install -y --no-install-recommends \
         socat iproute2 && \
     rm -rf /var/lib/apt/lists/* /var/cache/ldconfig/aux-cache && \
+    groupadd --system -g 1000 circle && \
+    useradd --system -u 1000 -g circle -d /usr/local/circle circle && \
     : > /var/log/dpkg.log && \
     : > /var/log/apt/eipp.log.xz && \
     : > /var/log/apt/history.log && \
@@ -63,8 +65,14 @@ RUN --mount=type=bind,from=app-builder,source=/app,target=/tmp/app \
     cp -r /tmp/configs /usr/local/circle/configs && \
     cp /tmp/run_enclave.sh /usr/local/circle/run_enclave.sh && \
     chmod 0750 /usr/local/circle/run_enclave.sh && \
+    chown -R circle:circle /usr/local/circle && \
     find /usr/local -newermt "@0" -exec touch -hcd "@0" {} + 2>/dev/null || true && \
     touch -hcd "@0" /tmp /etc
 
 WORKDIR /usr/local/circle
+
+# Security fix: declared a non-root `USER`, matching the `signer` stage in `Dockerfile`. The
+# enclave stage holds the AES data key and the encrypted private key, so it must not run as root.
+USER circle
+
 ENTRYPOINT ["/usr/local/circle/run_enclave.sh"]
