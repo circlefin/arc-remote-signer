@@ -66,6 +66,15 @@ FROM base AS signer
 COPY --chmod=0750 docker/run_proxy.sh ./run_proxy.sh
 COPY --chmod=0750 docker/run_enclave.sh ./run_enclave.sh
 COPY --chmod=0750 docker/run_enclave.dev.sh ./run_enclave.dev.sh
+
+# Security fix: enforce non-root execution. The signer stage handles signing material and
+# interfaces with KMS, so running as root creates an unnecessary privilege escalation surface.
+RUN groupadd --system -g 1000 circle && \
+    useradd --system -u 1000 -g circle -d /usr/local/circle circle && \
+    chown -R circle:circle /usr/local/circle
+
+USER circle
+
 ENTRYPOINT ["/usr/local/circle/run_proxy.sh"]
 
 ### This is the image that runs outside the nitro enclave, including the enclave binary (EIF file)
