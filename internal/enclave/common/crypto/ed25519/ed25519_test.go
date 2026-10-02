@@ -16,6 +16,7 @@ package ed25519
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/hex"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
@@ -182,6 +183,20 @@ func (s *ed25519TestSuite) TestVerifySignedMessage() {
 		s.True(valid)
 	})
 
+	s.Run("ZIP-215 signature rejected by standard verifier", func() {
+		// Vector 2 from ed25519consensus v0.2.0's ZIP-215 test suite.
+		zip215PublicKey, err := hex.DecodeString("0100000000000000000000000000000000000000000000000000000000000000")
+		s.Require().NoError(err)
+		zip215Signature, err := hex.DecodeString("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a0000000000000000000000000000000000000000000000000000000000000000")
+		s.Require().NoError(err)
+		zip215Message := []byte("Zcash")
+
+		s.False(ed25519.Verify(zip215PublicKey, zip215Message, zip215Signature))
+		valid, err := VerifySignedMessage(zip215Signature, zip215Message, zip215PublicKey)
+		s.NoError(err)
+		s.True(valid)
+	})
+
 	s.Run("signature verification with wrong message fails", func() {
 		wrongMessage := []byte("wrong message")
 		valid, err := VerifySignedMessage(signature, wrongMessage, publicKey)
@@ -295,6 +310,40 @@ func (s *ed25519TestSuite) TestDeserialize() {
 		s.Require().NoError(err)
 
 		s.True(bytes.Equal(originalSig, deserializedSig), "Signatures should match")
+	})
+
+	s.Run("rejects modified public key component", func() {
+		malformedKey := append([]byte(nil), serializedKey...)
+		malformedKey[ed25519.SeedSize] ^= 0xff
+
+		deserializedKey, err := Deserialize(malformedKey)
+
+		s.Error(err)
+		s.Nil(deserializedKey)
+	})
+
+	s.Run("rejects modified seed with original public key component", func() {
+		malformedKey := append([]byte(nil), serializedKey...)
+		malformedKey[0] ^= 0xff
+
+		deserializedKey, err := Deserialize(malformedKey)
+
+		s.Error(err)
+		s.Nil(deserializedKey)
+	})
+
+	s.Run("does not retain the input buffer", func() {
+		input := append([]byte(nil), serializedKey...)
+		deserializedKey, err := Deserialize(input)
+		s.Require().NoError(err)
+
+		for i := range input {
+			input[i] ^= 0xff
+		}
+
+		got, err := deserializedKey.Serialize()
+		s.Require().NoError(err)
+		s.Equal(serializedKey, got)
 	})
 
 	s.Run("empty data deserialization", func() {

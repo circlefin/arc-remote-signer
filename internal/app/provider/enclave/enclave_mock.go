@@ -56,26 +56,6 @@ func (mr *MockEnclaveServiceClientMockRecorder) GenerateKey(arg0, arg1 interface
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GenerateKey", reflect.TypeOf((*MockEnclaveServiceClient)(nil).GenerateKey), varargs...)
 }
 
-// GetAttestation mocks base method.
-func (m *MockEnclaveServiceClient) GetAttestation(arg0 context.Context, arg1 *pb.GetAttestationRequest, arg2 ...grpc.CallOption) (*pb.GetAttestationResponse, error) {
-	m.ctrl.T.Helper()
-	varargs := []interface{}{arg0, arg1}
-	for _, a := range arg2 {
-		varargs = append(varargs, a)
-	}
-	ret := m.ctrl.Call(m, "GetAttestation", varargs...)
-	ret0, _ := ret[0].(*pb.GetAttestationResponse)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// GetAttestation indicates an expected call of GetAttestation.
-func (mr *MockEnclaveServiceClientMockRecorder) GetAttestation(arg0, arg1 interface{}, arg2 ...interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	varargs := append([]interface{}{arg0, arg1}, arg2...)
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAttestation", reflect.TypeOf((*MockEnclaveServiceClient)(nil).GetAttestation), varargs...)
-}
-
 // GetPublicKey mocks base method.
 func (m *MockEnclaveServiceClient) GetPublicKey(arg0 context.Context, arg1 *pb.GetPublicKeyRequest, arg2 ...grpc.CallOption) (*pb.GetPublicKeyResponse, error) {
 	m.ctrl.T.Helper()
@@ -94,6 +74,26 @@ func (mr *MockEnclaveServiceClientMockRecorder) GetPublicKey(arg0, arg1 interfac
 	mr.mock.ctrl.T.Helper()
 	varargs := append([]interface{}{arg0, arg1}, arg2...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPublicKey", reflect.TypeOf((*MockEnclaveServiceClient)(nil).GetPublicKey), varargs...)
+}
+
+// Initialize mocks base method.
+func (m *MockEnclaveServiceClient) Initialize(arg0 context.Context, arg1 *pb.InitializeRequest, arg2 ...grpc.CallOption) (*pb.InitializeResponse, error) {
+	m.ctrl.T.Helper()
+	varargs := []interface{}{arg0, arg1}
+	for _, a := range arg2 {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "Initialize", varargs...)
+	ret0, _ := ret[0].(*pb.InitializeResponse)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Initialize indicates an expected call of Initialize.
+func (mr *MockEnclaveServiceClientMockRecorder) Initialize(arg0, arg1 interface{}, arg2 ...interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]interface{}{arg0, arg1}, arg2...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Initialize", reflect.TypeOf((*MockEnclaveServiceClient)(nil).Initialize), varargs...)
 }
 
 // SignMessage mocks base method.

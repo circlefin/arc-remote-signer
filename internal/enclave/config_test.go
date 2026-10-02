@@ -14,6 +14,10 @@
 package enclave
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/circlefin/arc-remote-signer/internal/common/config"
@@ -25,13 +29,9 @@ func TestNewConfig(t *testing.T) {
 	cfg := NewConfig()
 
 	require.NotNil(t, cfg)
-	require.NotNil(t, cfg.BaseConfig)
 	require.NotNil(t, cfg.Public)
 	require.NotNil(t, cfg.Public.Server)
 	require.NotNil(t, cfg.NitroEnclave)
-
-	// Check base config defaults
-	assert.Equal(t, config.Dev, cfg.Env)
 
 	// Check public server defaults
 	assert.Equal(t, "127.0.0.1", cfg.Public.Server.Host)
@@ -41,83 +41,14 @@ func TestNewConfig(t *testing.T) {
 	assert.True(t, cfg.NitroEnclave.Enabled)
 }
 
+func TestConfigHasNoDeploymentEnvironment(t *testing.T) {
+	_, found := reflect.TypeOf(Config{}).FieldByName("Env")
+	require.False(t, found, "enclave config must not accept APP_ENV")
+}
+
 func TestConfig_GetName(t *testing.T) {
 	cfg := NewConfig()
 	assert.Equal(t, "nitro-enclave-signer-internal", cfg.GetName())
-}
-
-func TestConfig_IsProduction(t *testing.T) {
-	tests := []struct {
-		name     string
-		env      config.Environment
-		expected bool
-	}{
-		{
-			name:     "Dev environment is not production",
-			env:      config.Dev,
-			expected: false,
-		},
-		{
-			name:     "QA environment is not production",
-			env:      config.QA,
-			expected: false,
-		},
-		{
-			name:     "Stg environment is not production",
-			env:      config.Stg,
-			expected: false,
-		},
-		{
-			name:     "Prod environment is production",
-			env:      config.Prod,
-			expected: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewConfig()
-			cfg.Env = tt.env
-			assert.Equal(t, tt.expected, cfg.IsProduction())
-		})
-	}
-}
-
-func TestConfig_IsDevelopment(t *testing.T) {
-	tests := []struct {
-		name     string
-		env      config.Environment
-		expected bool
-	}{
-		{
-			name:     "Dev environment is development",
-			env:      config.Dev,
-			expected: true,
-		},
-		{
-			name:     "QA environment is not development",
-			env:      config.QA,
-			expected: false,
-		},
-		{
-			name:     "Stg environment is not development",
-			env:      config.Stg,
-			expected: false,
-		},
-		{
-			name:     "Prod environment is not development",
-			env:      config.Prod,
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewConfig()
-			cfg.Env = tt.env
-			assert.Equal(t, tt.expected, cfg.IsDevelopment())
-		})
-	}
 }
 
 func TestConfig_ImplementsApplicationConfig(t *testing.T) {
@@ -149,20 +80,121 @@ func TestNitroEnclaveConfig_Disabled(t *testing.T) {
 	assert.False(t, cfg.NitroEnclave.Enabled)
 }
 
+// TestLoadConfig_YamlOverridesMutatedDefaults guards against a
+// mapstructure tag drift bug: if a tag does not match the key that
+// yaml.Marshal of the defaults produces (lowercased Go field name with
+// no separator), the YAML subtree is silently dropped and NewConfig
+// defaults take over. We detect that by mutating the defaults before
+// LoadConfig and verifying the YAML value wins.
+func TestLoadConfig_YamlOverridesMutatedDefaults(t *testing.T) {
+	yamlPath := filepath.Join(t.TempDir(), "enclave.yaml")
+	const yamlBody = `public:
+  server:
+    host: 1.2.3.4
+    port: 11111
+nitroEnclave:
+  enabled: false
+  awsproxyEndpoint: http://example:8080
+  kmsConnectTimeoutMs: 4242
+`
+	require.NoError(t, os.WriteFile(yamlPath, []byte(yamlBody), 0o600))
+
+	cfg := NewConfig()
+	cfg.Public.Server.Host = "DEFAULT-HOST"
+	cfg.Public.Server.Port = 99999
+	cfg.NitroEnclave.Enabled = true
+	cfg.NitroEnclave.AwsproxyEndpoint = "DEFAULT-ENDPOINT"
+	cfg.NitroEnclave.KmsConnectTimeoutMs = 99999
+
+	config.LoadConfig(cfg, yamlPath)
+
+	assert.Equal(t, "1.2.3.4", cfg.Public.Server.Host)
+	assert.Equal(t, 11111, cfg.Public.Server.Port)
+	assert.False(t, cfg.NitroEnclave.Enabled,
+		"YAML nitroEnclave.enabled=false must override mutated default Enabled=true")
+	assert.Equal(t, "http://example:8080", cfg.NitroEnclave.AwsproxyEndpoint,
+		"YAML nitroEnclave.awsproxyEndpoint must override mutated default")
+	assert.Equal(t, 4242, cfg.NitroEnclave.KmsConnectTimeoutMs,
+		"YAML nitroEnclave.kmsConnectTimeoutMs must override mutated default")
+}
+
+// TestLoadConfig_EnvOverridesYaml pins the env-var override path used by
+// docker-compose to point the in-enclave KMS client at LocalStack in dev
+// mode. The docker-compose file sets APP_NITROENCLAVE_AWSPROXYENDPOINT,
+// expecting it to flow through viper's env replacer into
+// NitroEnclaveConfig.AwsproxyEndpoint. If the mapstructure tag spelling
+// or viper key normalisation drifts, this test fails fast so dev runs
+// don't silently fall back to the production default.
+func TestLoadConfig_EnvOverridesYaml(t *testing.T) {
+	yamlPath := filepath.Join(t.TempDir(), "enclave.yaml")
+	const yamlBody = `nitroEnclave:
+  enabled: true
+  awsproxyEndpoint: http://yaml-default:10316
+`
+	require.NoError(t, os.WriteFile(yamlPath, []byte(yamlBody), 0o600))
+
+	t.Setenv("APP_NITROENCLAVE_AWSPROXYENDPOINT", "http://localstack:4566")
+
+	cfg := NewConfig()
+	config.LoadConfig(cfg, yamlPath)
+
+	assert.Equal(t, "http://localstack:4566", cfg.NitroEnclave.AwsproxyEndpoint,
+		"APP_NITROENCLAVE_AWSPROXYENDPOINT must override YAML and default value")
+}
+
+func TestValidateAwsproxyConfig(t *testing.T) {
+	t.Run("matching default ports pass", func(t *testing.T) {
+		require.NoError(t, validateAwsproxyConfig(NewConfig()))
+	})
+
+	t.Run("port mismatch is rejected", func(t *testing.T) {
+		cfg := NewConfig()
+		cfg.Awsproxy.BasePort = cfg.Awsproxy.BasePort + 1 // diverge from the endpoint port
+		err := validateAwsproxyConfig(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "config mismatch")
+	})
+
+	t.Run("localhost host is accepted", func(t *testing.T) {
+		cfg := NewConfig()
+		cfg.NitroEnclave.AwsproxyEndpoint = fmt.Sprintf("http://localhost:%d", cfg.Awsproxy.BasePort)
+		require.NoError(t, validateAwsproxyConfig(cfg))
+	})
+
+	t.Run("non-loopback host is rejected", func(t *testing.T) {
+		cfg := NewConfig()
+		cfg.NitroEnclave.AwsproxyEndpoint = fmt.Sprintf("http://evil.example:%d", cfg.Awsproxy.BasePort)
+		err := validateAwsproxyConfig(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "loopback")
+	})
+
+	t.Run("endpoint without a port is rejected", func(t *testing.T) {
+		cfg := NewConfig()
+		cfg.NitroEnclave.AwsproxyEndpoint = "http://127.0.0.1"
+		err := validateAwsproxyConfig(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "has no port")
+	})
+
+	t.Run("malformed endpoint is rejected", func(t *testing.T) {
+		cfg := NewConfig()
+		cfg.NitroEnclave.AwsproxyEndpoint = "://bad"
+		err := validateAwsproxyConfig(cfg)
+		require.Error(t, err)
+	})
+}
+
 func TestConfig_CustomValues(t *testing.T) {
 	cfg := NewConfig()
 
 	// Modify config
-	cfg.Env = config.Prod
 	cfg.Public.Server.Host = "0.0.0.0"
 	cfg.Public.Server.Port = 8080
 	cfg.NitroEnclave.Enabled = false
 
 	// Verify modifications
-	assert.Equal(t, config.Prod, cfg.Env)
 	assert.Equal(t, "0.0.0.0", cfg.Public.Server.Host)
 	assert.Equal(t, 8080, cfg.Public.Server.Port)
 	assert.False(t, cfg.NitroEnclave.Enabled)
-	assert.True(t, cfg.IsProduction())
-	assert.False(t, cfg.IsDevelopment())
 }

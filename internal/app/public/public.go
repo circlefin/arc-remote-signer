@@ -53,7 +53,9 @@ func New(cfg *grpcServer.Config, params CreateServerParams) (lifecycle.Runnable,
 	}
 
 	grpcSrv := grpcServer.NewServer(engineParams, opts...)
-	reflection.Register(grpcSrv)
+	if cfg.Reflection.Enabled {
+		reflection.Register(grpcSrv)
+	}
 	pb.RegisterSignerServiceServer(grpcSrv, params.SignerSvc)
 
 	runnable, err := grpcServer.NewRunnable(

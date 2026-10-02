@@ -51,6 +51,24 @@ group "default" {
   targets = ["signer"]
 }
 
+// The signer-dev image contains the host executable and the standalone enclave executable.
+target "signer-dev-meta-target" {
+  context    = "."
+  dockerfile = "docker/Dockerfile"
+  target     = "signer-dev"
+
+  contexts = {
+    certs = "./docker/certs"
+  }
+
+  tags   = ["nitro-enclave-signer/signer-dev:latest"]
+  output = CI ? [] : ["type=docker"]
+}
+
+target "signer-dev" {
+  inherits = ["signer-dev-meta-target", "docker-metadata-action"]
+}
+
 // Enclave uses a separate Dockerfile for reproducible builds.
 target "enclave-meta-target" {
   context    = "."

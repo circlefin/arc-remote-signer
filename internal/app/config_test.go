@@ -11,6 +11,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !prod
+
 package app
 
 import (
@@ -185,6 +187,7 @@ func TestNewConfig(t *testing.T) {
 	// Check public server defaults
 	require.Equal(t, "0.0.0.0", cfg.Public.Server.Host)
 	require.Equal(t, 8080, cfg.Public.Server.Port)
+	require.False(t, cfg.Public.Server.Reflection.Enabled)
 
 	// Check profiler defaults
 	require.False(t, cfg.Profiler.Enabled)
@@ -197,12 +200,16 @@ func TestNewConfig_TLSDefaultEnablesEnvBinding(t *testing.T) {
 	// public.server.tls.* keys and APP_PUBLIC_SERVER_TLS_* env vars can bind.
 	require.NotNil(t, cfg.Public.Server.TLS)
 	require.False(t, cfg.Public.Server.TLS.Enabled)
+	require.False(t, cfg.Public.Server.TLS.ClientAuth.Enabled)
+	require.Empty(t, cfg.Public.Server.TLS.ClientAuth.CA)
 }
 
 func TestLoadConfig_TLSEnvOverride(t *testing.T) {
 	t.Setenv("APP_PUBLIC_SERVER_TLS_ENABLED", "true")
 	t.Setenv("APP_PUBLIC_SERVER_TLS_CERT", "/etc/tls/server.crt")
 	t.Setenv("APP_PUBLIC_SERVER_TLS_KEY", "/etc/tls/server.key")
+	t.Setenv("APP_PUBLIC_SERVER_TLS_CLIENTAUTH_ENABLED", "true")
+	t.Setenv("APP_PUBLIC_SERVER_TLS_CLIENTAUTH_CA", "/etc/tls/client-ca.crt")
 
 	cfg := NewConfig()
 	config.LoadConfig(cfg, "")
@@ -211,6 +218,26 @@ func TestLoadConfig_TLSEnvOverride(t *testing.T) {
 	require.True(t, cfg.Public.Server.TLS.Enabled)
 	require.Equal(t, "/etc/tls/server.crt", cfg.Public.Server.TLS.Cert)
 	require.Equal(t, "/etc/tls/server.key", cfg.Public.Server.TLS.Key)
+	require.True(t, cfg.Public.Server.TLS.ClientAuth.Enabled)
+	require.Equal(t, "/etc/tls/client-ca.crt", cfg.Public.Server.TLS.ClientAuth.CA)
+}
+
+func TestLoadConfig_ReflectionEnvOverride(t *testing.T) {
+	t.Setenv("APP_PUBLIC_SERVER_REFLECTION_ENABLED", "true")
+
+	cfg := NewConfig()
+	config.LoadConfig(cfg, "")
+
+	require.True(t, cfg.Public.Server.Reflection.Enabled)
+}
+
+func TestLoadConfig_AWSKMSLocalstackEnvOverride(t *testing.T) {
+	t.Setenv("APP_PROVIDER_AWSKMS_LOCALSTACK_ENABLED", "false")
+
+	cfg := NewConfig()
+	config.LoadConfig(cfg, "")
+
+	require.False(t, cfg.Provider.AWSKMS.Localstack.Enabled)
 }
 
 func TestConfig_GetName(t *testing.T) {
@@ -326,7 +353,7 @@ func TestRetrieveAWSConfig_ErrorCases(t *testing.T) {
 				cfg.BaseConfig = nil
 				return cfg
 			},
-			wantError: "secrets config unavailable",
+			wantError: "secrets configuration is unavailable",
 		},
 		{
 			name: "nil secrets config",
@@ -335,7 +362,7 @@ func TestRetrieveAWSConfig_ErrorCases(t *testing.T) {
 				cfg.Provider.Secrets = nil
 				return cfg
 			},
-			wantError: "secrets config unavailable",
+			wantError: "secrets configuration is unavailable",
 		},
 		{
 			name: "nil localstack config",
@@ -344,7 +371,7 @@ func TestRetrieveAWSConfig_ErrorCases(t *testing.T) {
 				cfg.Provider.Secrets.Localstack = nil
 				return cfg
 			},
-			wantError: "secrets config unavailable",
+			wantError: "secrets configuration is unavailable",
 		},
 	}
 

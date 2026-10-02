@@ -18,6 +18,7 @@ package enclave
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/circlefin/arc-remote-signer/internal/common/grpc/client"
 	"github.com/circlefin/arc-remote-signer/proto/pb"
@@ -26,6 +27,28 @@ import (
 
 // New creates a new enclave provider.
 func New(pc *ProviderConfig) (pb.EnclaveServiceClient, *grpc.ClientConn, error) {
+	var extraDialOptions []grpc.DialOption
+	if pc != nil && pc.NitroEnclave != nil && pc.NitroEnclave.Enabled {
+		if pc.NitroEnclave.CID == 0 || pc.NitroEnclave.Port == 0 {
+			return nil, nil, fmt.Errorf("nitro enclave mode requires a valid CID and port")
+		}
+		extraDialOptions = append(extraDialOptions, grpc.WithContextDialer(NewVsockDialer(pc.NitroEnclave.CID, pc.NitroEnclave.Port)))
+	}
+	return newClient(pc, extraDialOptions...)
+}
+
+// NewNitro creates an enclave client that always uses VSOCK.
+func NewNitro(pc *ProviderConfig) (pb.EnclaveServiceClient, *grpc.ClientConn, error) {
+	if pc == nil || pc.NitroEnclave == nil || pc.NitroEnclave.CID == 0 || pc.NitroEnclave.Port == 0 {
+		return nil, nil, fmt.Errorf("nitro enclave mode requires a valid CID and port")
+	}
+	return newClient(
+		pc,
+		grpc.WithContextDialer(NewVsockDialer(pc.NitroEnclave.CID, pc.NitroEnclave.Port)),
+	)
+}
+
+func newClient(pc *ProviderConfig, extraDialOptions ...grpc.DialOption) (pb.EnclaveServiceClient, *grpc.ClientConn, error) {
 	if pc == nil {
 		return nil, nil, fmt.Errorf("provider config is nil")
 	}
@@ -33,20 +56,33 @@ func New(pc *ProviderConfig) (pb.EnclaveServiceClient, *grpc.ClientConn, error) 
 		return nil, nil, fmt.Errorf("provider client config is nil")
 	}
 
-	nitroEnabled := pc.NitroEnclave != nil && pc.NitroEnclave.Enabled
-	if nitroEnabled && (pc.NitroEnclave.CID <= 0 || pc.NitroEnclave.Port == 0) {
-		return nil, nil, fmt.Errorf("nitro enclave is enabled but cid or port is invalid")
-	}
-
-	var extraDialOptions []grpc.DialOption
-	if nitroEnabled {
-		extraDialOptions = append(extraDialOptions, grpc.WithContextDialer(NewVsockDialer(pc.NitroEnclave.CID, pc.NitroEnclave.Port)))
-	}
-
-	conn, err := client.NewInsecureClientConn(pc.Client.BaseURL, *pc.Client, extraDialOptions...)
+	clientConfig := pinInitializeTransportAttempts(*pc.Client)
+	conn, err := client.NewInsecureClientConn(pc.Client.BaseURL, clientConfig, extraDialOptions...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create enclave client connection: %w", err)
 	}
 
 	return pb.NewEnclaveServiceClient(conn), conn, nil
+}
+
+func pinInitializeTransportAttempts(cfg client.Config) client.Config {
+	methods := make(map[string]client.MethodConfig, len(cfg.Methods)+1)
+	for method, methodConfig := range cfg.Methods {
+		if slash := strings.LastIndex(method, "/"); slash >= 0 {
+			if strings.EqualFold(method[slash+1:], "Initialize") {
+				methodConfig.MaxAttempts = 1
+			}
+		} else if strings.EqualFold(method, "Initialize") {
+			methodConfig.MaxAttempts = 1
+		}
+		methods[method] = methodConfig
+	}
+	initializeConfig, ok := methods["initialize"]
+	if !ok {
+		initializeConfig.TimeoutMS = defaultStartupTimeoutMS
+	}
+	initializeConfig.MaxAttempts = 1
+	methods["initialize"] = initializeConfig
+	cfg.Methods = methods
+	return cfg
 }

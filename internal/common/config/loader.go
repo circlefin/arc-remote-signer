@@ -18,6 +18,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
 	"sigs.k8s.io/yaml"
 )
@@ -60,7 +61,7 @@ func LoadConfig(cfg ApplicationConfig, cfgFile string) {
 			log.Fatalf("Unable to parse config file: %v", err)
 		}
 		if cfgFile != "" {
-			log.Printf("Warning: specified config file not found: %v", err)
+			log.Fatalf("Specified config file could not be loaded: %v", err)
 		}
 	}
 
@@ -70,7 +71,11 @@ func LoadConfig(cfg ApplicationConfig, cfgFile string) {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
 	// Unmarshal into config struct
-	if err := v.Unmarshal(cfg); err != nil {
+	if err := v.Unmarshal(cfg, func(decoderConfig *mapstructure.DecoderConfig) {
+		// Clear maps before decode to prevent duplicate normalized method-map
+		// keys from defaults and file or environment input.
+		decoderConfig.ZeroFields = true
+	}); err != nil {
 		log.Fatalf("Unable to decode config: %v", err)
 	}
 

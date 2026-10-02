@@ -4,3 +4,8 @@ public:
     port: 10350
 nitroEnclave:
   enabled: true
+  awsproxyEndpoint: http://127.0.0.1:10316
+  kmsConnectTimeoutMs: 3000
+awsproxy:
+  base_port: 10316
+  max_conns: 50

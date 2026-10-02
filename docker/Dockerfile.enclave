@@ -16,8 +16,8 @@ FROM ${GOLANG_IMAGE} AS build-base
 RUN --mount=type=bind,from=certs,target=/usr/local/share/ca-certificates/ \
     update-ca-certificates
 
-### Build the app binary inside Docker for a reproducible CGO toolchain.
-FROM build-base AS app-builder
+### Docker builds the enclave executable with a reproducible CGO toolchain.
+FROM build-base AS enclave-builder
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -30,7 +30,7 @@ RUN make -C proto proto
 
 # Build with BLS portability flag and reproducibility flags.
 RUN CGO_ENABLED=1 CGO_CFLAGS="-O2 -D__BLST_PORTABLE__" \
-    go build -trimpath -buildvcs=false -ldflags=-buildid= -o /app .
+    go build -tags=prod -trimpath -buildvcs=false -ldflags=-buildid= -o /enclave ./cmd/enclave
 
 ### Enclave image - self-contained reproducible build.
 FROM ${DEBIAN_IMAGE} AS enclave
@@ -38,32 +38,36 @@ ARG SOURCE_DATE_EPOCH
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 ARG SNAPSHOT_DATE
 
-# Truncate debian.sources to avoid non-deterministic whiteout files.
-RUN --mount=type=bind,from=build-base,source=/etc/ssl/certs,target=/etc/ssl/certs \
+# Use the builder CA bundle so that APT can use HTTPS.
+# APT then installs the pinned CA bundle in the image.
+RUN --mount=type=bind,from=build-base,source=/etc/ssl/certs/ca-certificates.crt,target=/tmp/ca-certificates.crt \
+    mkdir -p /etc/ssl/certs && \
+    cp /tmp/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt && \
     : > /etc/apt/sources.list.d/debian.sources && \
     echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${SNAPSHOT_DATE}/ bookworm main" > /etc/apt/sources.list && \
     echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${SNAPSHOT_DATE}/ bookworm-security main" >> /etc/apt/sources.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        socat iproute2 && \
+        iproute2 ca-certificates && \
+    update-ca-certificates && \
     rm -rf /var/lib/apt/lists/* /var/cache/ldconfig/aux-cache && \
     : > /var/log/dpkg.log && \
     : > /var/log/apt/eipp.log.xz && \
     : > /var/log/apt/history.log && \
     : > /var/log/apt/term.log && \
-    find /etc /tmp /usr /var -newermt "@0" -exec touch -hcd "@0" {} + 2>/dev/null || true
+    (find /etc /tmp /usr /var -newermt "@0" -exec touch -hcd "@0" {} + 2>/dev/null || true)
 
 # Keep WORKDIR creation and file copy in one layer to avoid fresh timestamps.
-RUN --mount=type=bind,from=app-builder,source=/app,target=/tmp/app \
-    --mount=type=bind,source=configs,target=/tmp/configs \
+RUN --mount=type=bind,from=enclave-builder,source=/enclave,target=/tmp/enclave \
+    --mount=type=bind,source=configs/enclave.yaml,target=/tmp/enclave.yaml \
     --mount=type=bind,source=docker/run_enclave.sh,target=/tmp/run_enclave.sh \
-    mkdir -p /usr/local/circle && \
-    cp /tmp/app /usr/local/circle/app && \
-    chmod 0750 /usr/local/circle/app && \
-    cp -r /tmp/configs /usr/local/circle/configs && \
+    mkdir -p /usr/local/circle/configs && \
+    cp /tmp/enclave /usr/local/circle/enclave && \
+    chmod 0750 /usr/local/circle/enclave && \
+    cp /tmp/enclave.yaml /usr/local/circle/configs/enclave.yaml && \
     cp /tmp/run_enclave.sh /usr/local/circle/run_enclave.sh && \
     chmod 0750 /usr/local/circle/run_enclave.sh && \
-    find /usr/local -newermt "@0" -exec touch -hcd "@0" {} + 2>/dev/null || true && \
+    (find /usr/local -newermt "@0" -exec touch -hcd "@0" {} + 2>/dev/null || true) && \
     touch -hcd "@0" /tmp /etc
 
 WORKDIR /usr/local/circle

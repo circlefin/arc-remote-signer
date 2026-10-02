@@ -15,14 +15,27 @@ package server
 
 // Config represents the configuration for the gRPC server.
 type Config struct {
-	Host string     `mapstructure:"host"`
-	Port int        `mapstructure:"port"`
-	TLS  *TLSConfig `mapstructure:"tls"`
+	Host       string           `mapstructure:"host"`
+	Port       int              `mapstructure:"port"`
+	TLS        *TLSConfig       `mapstructure:"tls"`
+	Reflection ReflectionConfig `mapstructure:"reflection"`
+}
+
+// ReflectionConfig represents the gRPC server reflection configuration.
+type ReflectionConfig struct {
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // TLSConfig represents the TLS configuration to the gRPC server.
 type TLSConfig struct {
+	Enabled    bool             `mapstructure:"enabled"`
+	Cert       string           `mapstructure:"cert"`
+	Key        string           `mapstructure:"key"`
+	ClientAuth ClientAuthConfig `mapstructure:"clientAuth"`
+}
+
+// ClientAuthConfig represents TLS client certificate authentication.
+type ClientAuthConfig struct {
 	Enabled bool   `mapstructure:"enabled"`
-	Cert    string `mapstructure:"cert"`
-	Key     string `mapstructure:"key"`
+	CA      string `mapstructure:"ca"`
 }

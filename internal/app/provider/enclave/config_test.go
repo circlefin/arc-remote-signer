@@ -15,6 +15,7 @@ package enclave
 
 import (
 	"testing"
+	"time"
 
 	grpcClient "github.com/circlefin/arc-remote-signer/internal/common/grpc/client"
 	"github.com/stretchr/testify/require"
@@ -31,12 +32,20 @@ func TestNewProviderConfig_Defaults(t *testing.T) {
 	require.Equal(t, uint32(enclaveDefaultCID), cfg.NitroEnclave.CID)
 	require.Equal(t, uint32(10350), cfg.NitroEnclave.Port)
 
-	expectedClientCfg := grpcClient.NewClientConfig(providerName, enclaveDefaultURL)
-	require.Equal(t, expectedClientCfg.Name, cfg.Client.Name)
-	require.Equal(t, expectedClientCfg.BaseURL, cfg.Client.BaseURL)
-	require.Equal(t, expectedClientCfg.RequestTimeoutMS, cfg.Client.RequestTimeoutMS)
+	require.Equal(t, providerName, cfg.Client.Name)
+	require.Equal(t, enclaveDefaultURL, cfg.Client.BaseURL)
+	require.Equal(t, defaultSignMessageTimeoutMS, cfg.Client.RequestTimeoutMS)
 	require.NotNil(t, cfg.Client.Retry)
-	require.NotNil(t, expectedClientCfg.Retry)
-	require.Equal(t, expectedClientCfg.Retry.MaxAttempts, cfg.Client.Retry.MaxAttempts)
-	require.Equal(t, expectedClientCfg.Retry.RetryCodes, cfg.Client.Retry.RetryCodes)
+	require.Equal(t, uint(1), cfg.Client.Retry.MaxAttempts)
+	require.Equal(t, DefaultMethodTimeouts(), cfg.Client.Methods)
+	require.Equal(t, uint(1), cfg.Client.Methods["initialize"].MaxAttempts)
+	require.Equal(t, 30*time.Second, cfg.StartupTimeout())
+}
+
+func TestProviderConfig_StartupTimeoutUsesIndependentTotalBudget(t *testing.T) {
+	cfg := NewProviderConfig()
+	cfg.StartupTimeoutMS = 1250
+	cfg.Client.Methods["initialize"] = grpcClient.MethodConfig{TimeoutMS: 60000}
+
+	require.Equal(t, 1250*time.Millisecond, cfg.StartupTimeout())
 }

@@ -19,7 +19,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/circlefin/arc-remote-signer/internal/common/crypto/rand"
 	"github.com/circlefin/arc-remote-signer/proto/pb"
 	"github.com/stretchr/testify/suite"
 	"google.golang.org/grpc"
@@ -27,15 +26,16 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// testKMSKeyARN is the LocalStack multi-region key alias created by
+// deployments/localstack_scripts/create-kms-keys.sh.
+const testKMSKeyARN = "arn:aws:kms:us-east-1:000000000000:alias/dev-multi-region-crypto"
+
 type integrationTestSuite struct {
 	suite.Suite
 
-	client                     pb.EnclaveServiceClient
-	conn                       *grpc.ClientConn
-	testingEncryptedDataKey    []byte
-	testingEncryptedPrivateKey []byte
-	testingNonce               []byte
-	testingPubKey              []byte
+	client        pb.EnclaveServiceClient
+	conn          *grpc.ClientConn
+	testingPubKey []byte
 }
 
 func (suite *integrationTestSuite) SetupSuite() {
@@ -44,6 +44,29 @@ func (suite *integrationTestSuite) SetupSuite() {
 	suite.Require().NoError(err)
 	suite.client = client
 	suite.conn = conn
+
+	// The enclave now mints its own data key via KMS, so it must be
+	// initialized with credentials and the LocalStack KMS ARN before any
+	// GenerateKey/read RPC. Initialize is idempotent, so running it once per
+	// suite is sufficient. Credentials match the LocalStack values in
+	// docker-compose; session_token is a placeholder to satisfy the proto's
+	// min_len validation (LocalStack ignores it).
+	resp, err := suite.client.Initialize(context.Background(), &pb.InitializeRequest{
+		Credentials: &pb.AwsCredentials{
+			AccessKeyId:     "foo",
+			SecretAccessKey: "bar",
+			SessionToken:    "session",
+			Region:          "us-east-1",
+		},
+		KmsKeyArns:           []string{testKMSKeyARN},
+		KmsLocalstackEnabled: true,
+		KeySource: &pb.InitializeRequest_GenerateNew{
+			GenerateNew: pb.Algorithm_ALGORITHM_ED25519,
+		},
+	})
+	suite.Require().NoError(err)
+	suite.Require().NotNil(resp)
+	suite.testingPubKey = resp.PublicKey
 }
 
 func (suite *integrationTestSuite) TearDownSuite() {
@@ -51,39 +74,18 @@ func (suite *integrationTestSuite) TearDownSuite() {
 	suite.Require().NoError(err)
 }
 
-func (suite *integrationTestSuite) SetupTest() {
-	suite.testingEncryptedDataKey = rand.MustGenerateRandomBytes(32)
-	result, err := suite.client.GenerateKey(context.Background(), &pb.GenerateKeyRequest{
-		Algorithm:               pb.Algorithm_ALGORITHM_ED25519,
-		EnclaveEncryptedDataKey: suite.testingEncryptedDataKey,
-	})
-	suite.Require().NoError(err)
-	suite.Require().NotNil(result)
-	suite.Require().NotEmpty(result.PublicKey)
-	suite.Require().NotEmpty(result.EncryptedPrivateKey)
-	suite.Require().NotEmpty(result.Nonce)
-
-	suite.testingEncryptedPrivateKey = result.EncryptedPrivateKey
-	suite.testingNonce = result.Nonce
-	suite.testingPubKey = result.PublicKey
-}
-
 func (suite *integrationTestSuite) TestGenerateKey() {
-	suite.Run("success", func() {
+	suite.Run("disabled after initialization", func() {
 		result, err := suite.client.GenerateKey(context.Background(), &pb.GenerateKeyRequest{
-			Algorithm:               pb.Algorithm_ALGORITHM_ED25519,
-			EnclaveEncryptedDataKey: suite.testingEncryptedDataKey,
+			Algorithm: pb.Algorithm_ALGORITHM_ED25519,
 		})
-		suite.Require().NoError(err)
-		suite.Require().NotNil(result)
-		suite.Require().NotEmpty(result.PublicKey)
-		suite.Require().NotEmpty(result.EncryptedPrivateKey)
-		suite.Require().NotEmpty(result.Nonce)
+		suite.Require().Error(err)
+		suite.Require().Nil(result)
+		suite.Require().Equal(codes.FailedPrecondition, status.Code(err))
 	})
 	suite.Run("invalid algorithm", func() {
 		result, err := suite.client.GenerateKey(context.Background(), &pb.GenerateKeyRequest{
-			Algorithm:               pb.Algorithm_ALGORITHM_UNSPECIFIED,
-			EnclaveEncryptedDataKey: suite.testingEncryptedDataKey,
+			Algorithm: pb.Algorithm_ALGORITHM_UNSPECIFIED,
 		})
 		suite.Require().Error(err)
 		suite.Require().Nil(result)
@@ -93,14 +95,7 @@ func (suite *integrationTestSuite) TestGenerateKey() {
 
 func (suite *integrationTestSuite) TestGetPublicKey() {
 	suite.Run("success", func() {
-		result, err := suite.client.GetPublicKey(context.Background(), &pb.GetPublicKeyRequest{
-			Algorithm: pb.Algorithm_ALGORITHM_ED25519,
-			EncryptedKeyMaterial: &pb.EncryptedKeyMaterial{
-				EncryptedPrivateKey:     suite.testingEncryptedPrivateKey,
-				EnclaveEncryptedDataKey: suite.testingEncryptedDataKey,
-				Nonce:                   suite.testingNonce,
-			},
-		})
+		result, err := suite.client.GetPublicKey(context.Background(), &pb.GetPublicKeyRequest{})
 		suite.Require().NoError(err)
 		suite.Require().NotNil(result)
 		suite.Require().NotEmpty(result.PublicKey)
@@ -111,36 +106,18 @@ func (suite *integrationTestSuite) TestGetPublicKey() {
 func (suite *integrationTestSuite) TestSignMessage() {
 	suite.Run("success", func() {
 		result, err := suite.client.SignMessage(context.Background(), &pb.SignMessageRequest{
-			Algorithm: pb.Algorithm_ALGORITHM_ED25519,
-			EncryptedKeyMaterial: &pb.EncryptedKeyMaterial{
-				EncryptedPrivateKey:     suite.testingEncryptedPrivateKey,
-				EnclaveEncryptedDataKey: suite.testingEncryptedDataKey,
-				Nonce:                   suite.testingNonce,
-			},
 			Message: []byte("test message"),
 		})
 		suite.Require().NoError(err)
 		suite.Require().NotNil(result)
 		suite.Require().NotEmpty(result.Signature)
 	})
-	suite.Run("invalid algorithm", func() {
-		result, err := suite.client.SignMessage(context.Background(), &pb.SignMessageRequest{
-			Algorithm: pb.Algorithm_ALGORITHM_UNSPECIFIED,
-		})
+	suite.Run("empty message", func() {
+		result, err := suite.client.SignMessage(context.Background(), &pb.SignMessageRequest{})
 		suite.Require().Error(err)
 		suite.Require().Nil(result)
 		suite.Require().Equal(codes.InvalidArgument, status.Code(err))
 	})
-}
-
-func (suite *integrationTestSuite) TestGetAttestation() {
-	// Local/CI environments do not run enclave service inside Nitro Enclave.
-	// Therefore this integration test can only validate the "enclave not enabled"
-	// behavior, which should return FailedPrecondition.
-	resp, err := suite.client.GetAttestation(context.Background(), &pb.GetAttestationRequest{})
-	suite.Require().Error(err)
-	suite.Require().Equal(codes.FailedPrecondition, status.Code(err))
-	suite.Require().Nil(resp)
 }
 
 func TestEnclaveProviderIntegration(t *testing.T) {

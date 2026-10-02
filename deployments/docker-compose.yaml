@@ -5,18 +5,42 @@ x-health-retry:
   retries: 30
 
 services:
+  vsockproxy:
+    image: "nitro-enclave-signer-internal:local"
+    environment:
+      # Single switch: ENABLE_ENCLAVE (from configs/.env.dev) drives both this
+      # host-side flag and the enclave service's APP_NITROENCLAVE_ENABLED below,
+      # so the two cannot drift.
+      APP_PROVIDER_ENCLAVE_NITROENCLAVE_ENABLED: "${ENABLE_ENCLAVE:-false}"
+      APP_PROVIDER_AWSKMS_LOCALSTACK_ENABLED: "${APP_PROVIDER_AWSKMS_LOCALSTACK_ENABLED:-true}"
+      APP_PROVIDER_AWSKMS_ARNS: "${APP_PROVIDER_AWSKMS_ARNS:-arn:aws:kms:us-east-1:000000000000:alias/dev-multi-region-crypto,arn:aws:kms:us-west-2:000000000000:alias/dev-multi-region-crypto}"
+      APP_VSOCKPROXY_BASEPORT: "10316"
+      APP_VSOCKPROXY_MAXCONNS: "50"
+      # Arm the readiness sentinel: run-vsockproxy writes this file once it
+      # has bound its listener, so the healthcheck below can gate the enclave
+      # on the proxy actually accepting connections. Same mechanism prod uses
+      # via docker/run.sh.
+      VSOCKPROXY_READY_FILE: /tmp/vsockproxy.ready
+    entrypoint: ["/usr/local/circle/app", "--config", "/usr/local/circle/configs/app.yaml", "run-vsockproxy"]
+    healthcheck:
+      # Healthy only after the TCP listener (10316) is bound (sentinel
+      # written). Polls fast so it does not add ~10s to enclave startup.
+      test: ["CMD-SHELL", "test -e /tmp/vsockproxy.ready"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    depends_on:
+      localstack:
+        condition: service_healthy
+
   enclave:
     image: "nitro-enclave-signer-internal:local"
     environment:
-      APP_ENV: ${APP_ENV:-dev}
-      AWS_PROFILE: ${AWS_PROFILE:-}
-      AWS_ACCESS_KEY_ID: foo
-      AWS_SECRET_ACCESS_KEY: bar
-      APP_PROVIDER_AWSKMS_LOCALSTACK_ENABLED: true
-      APP_PROVIDER_AWSKMS_LOCALSTACK_ENDPOINT: http://localstack:4566
-      APP_PROVIDER_AWSKMS_LOCALSTACK_REGION: us-east-1
-      APP_PROVIDER_AWSKMS_ARNS: arn:aws:kms:us-east-1:000000000000:alias/dev-multi-region-crypto,arn:aws:kms:us-west-2:000000000000:alias/dev-multi-region-crypto
-      APP_NITROENCLAVE_ENABLED: false
+      # Derived from the same single switch (ENABLE_ENCLAVE) as the vsockproxy
+      # host flag above, so host and enclave agree on Nitro mode.
+      APP_NITROENCLAVE_ENABLED: "${ENABLE_ENCLAVE:-false}"
+      # The enclave routes KMS traffic through awsproxy to the host-side
+      # vsockproxy. The host selects LocalStack or AWS KMS.
     ulimits:
       memlock: -1
     ports:
@@ -26,6 +50,8 @@ services:
       <<: *health-retry
     entrypoint: ["/usr/local/circle/run_enclave.dev.sh"]
     depends_on:
+      vsockproxy:
+        condition: service_healthy
       localstack:
         condition: service_healthy
 

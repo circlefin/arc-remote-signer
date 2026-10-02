@@ -65,7 +65,7 @@ func recoveryWithLogger(logger *logging.Logger) grpc.UnaryServerInterceptor {
 						err = status.Error(codes.Unavailable, "connection closed")
 					}
 				} else {
-					err = status.Errorf(codes.Internal, "something went wrong: %v", r)
+					err = status.Error(codes.Internal, "something went wrong")
 				}
 			}
 		}()

@@ -8,6 +8,13 @@ public:
       enabled: false
       cert: ""
       key: ""
+      # clientAuth upgrades server-authenticated TLS to mutual TLS. Use a
+      # dedicated CA that issues certificates only to authorized clients.
+      clientAuth:
+        enabled: false
+        ca: ""
+    reflection:
+      enabled: false
 service:
   signer:
     keyId: "00000000-0000-0000-0000-000000000000"
@@ -19,6 +26,7 @@ provider: # config for external services
       endpoint: http://localhost:4566
       region: us-east-1
   enclave:
+    startupTimeoutMS: 30000
     nitroEnclave:
       enabled: false  # Set to true in production with Nitro Enclave (uses VSOCK)
       cid: 16         # Enclave CID (typically 16 for first enclave)
@@ -29,13 +37,22 @@ provider: # config for external services
       retry:
         maxAttempts: 1
       requestTimeoutMS: 500
+      methods:
+        initialize:
+          timeoutMS: 30000
+          maxAttempts: 1
+        generatekey:
+          timeoutMS: 30000
+          maxAttempts: 1
+        getpublickey:
+          timeoutMS: 30000
+        signmessage:
+          timeoutMS: 500
+          maxAttempts: 1
   awskms:
     localstack:
       enabled: false
-      endpoint: http://localhost:4566
-      region: us-east-1
     arns:
-    connectTimeout: 500
 profiler:
   # These are the dev values.  Even if we didn't want to specify dev values, we would still have to specify
   # the structure here so Viper knows to look for them in environment variables
@@ -53,3 +70,12 @@ metrics:
     host: 0.0.0.0
     port: 9090
     path: /metrics
+# vsockproxy configures the standalone host-side bridge process started via
+# `app run-vsockproxy`. `app run` ignores this block. The transport is
+# selected by provider.enclave.nitroEnclave.enabled above (shared with the
+# app process). Override fields with APP_VSOCKPROXY_* environment variables.
+vsockproxy:
+  basePort: 10316
+  maxConns: 50
+  # Standard AWS KMS requests use the ARN regions as an allowlist.
+  # LocalStack requests use the fixed compose service endpoint.

@@ -43,3 +43,23 @@ func TestNewClientConfigReturnsIndependentRetrySlices(t *testing.T) {
 	first.Retry.RetryCodes[0] = codes.Aborted
 	require.Equal(t, codes.Unavailable, second.Retry.RetryCodes[0])
 }
+
+func TestConfig_MethodsConfiguration(t *testing.T) {
+	cfg := &Config{
+		RequestTimeoutMS: 500,
+		Methods: map[string]MethodConfig{
+			"Initialize":   {TimeoutMS: 30000},
+			"GenerateKey":  {TimeoutMS: 30000, MaxAttempts: 1},
+			"GetPublicKey": {TimeoutMS: 30000},
+			"SignMessage":  {TimeoutMS: 500, MaxAttempts: 1},
+		},
+	}
+
+	require.Equal(t, 500, cfg.RequestTimeoutMS)
+	require.Equal(t, 30000, cfg.Methods["Initialize"].TimeoutMS)
+	require.Equal(t, 30000, cfg.Methods["GenerateKey"].TimeoutMS)
+	require.Equal(t, uint(1), cfg.Methods["GenerateKey"].MaxAttempts)
+	require.Equal(t, 30000, cfg.Methods["GetPublicKey"].TimeoutMS)
+	require.Equal(t, 500, cfg.Methods["SignMessage"].TimeoutMS)
+	require.Equal(t, uint(1), cfg.Methods["SignMessage"].MaxAttempts)
+}
