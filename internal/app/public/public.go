@@ -19,9 +19,12 @@ import (
 
 	"github.com/circlefin/arc-remote-signer/internal/common/config"
 	grpcServer "github.com/circlefin/arc-remote-signer/internal/common/grpc/server"
+	grpcInterceptor "github.com/circlefin/arc-remote-signer/internal/common/grpc/server/interceptor"
 	"github.com/circlefin/arc-remote-signer/internal/common/lifecycle"
 	"github.com/circlefin/arc-remote-signer/internal/common/metric"
 	"github.com/circlefin/arc-remote-signer/proto/pb"
+	"github.com/circlefin/arc-remote-signer/proto/pb/signerv2"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
 
@@ -31,6 +34,7 @@ type CreateServerParams struct {
 	Env         config.Environment
 	APIStatsSvc metric.APIStatsService
 	SignerSvc   pb.SignerServiceServer
+	SignerV2Svc signerv2.SignerServiceServer
 	// Prometheus, when set, installs the gRPC server metrics interceptor and
 	// pre-initializes per-method metrics. It is nil when metrics are disabled.
 	Prometheus *metric.Prometheus
@@ -51,18 +55,26 @@ func New(cfg *grpcServer.Config, params CreateServerParams) (lifecycle.Runnable,
 	if params.Prometheus != nil {
 		engineParams.UnaryInterceptors = append(engineParams.UnaryInterceptors, params.Prometheus.UnaryServerInterceptor())
 	}
+	engineParams.UnaryInterceptors = append(
+		engineParams.UnaryInterceptors,
+		replicaIdentityInterceptor(cfg.TLS),
+	)
 
 	grpcSrv := grpcServer.NewServer(engineParams, opts...)
 	if cfg.Reflection.Enabled {
 		reflection.Register(grpcSrv)
 	}
 	pb.RegisterSignerServiceServer(grpcSrv, params.SignerSvc)
+	signerv2.RegisterSignerServiceServer(grpcSrv, params.SignerV2Svc)
 
 	runnable, err := grpcServer.NewRunnable(
 		params.ServiceName,
 		grpcSrv,
 		grpcServer.WithListener(grpcServer.ListenerTransportTCP, cfg.Host, uint32(cfg.Port)),
-		grpcServer.WithHealthServer(pb.SignerService_ServiceDesc.ServiceName),
+		grpcServer.WithHealthServer(
+			pb.SignerService_ServiceDesc.ServiceName,
+			signerv2.SignerService_ServiceDesc.ServiceName,
+		),
 	)
 	if err != nil {
 		return nil, err
@@ -75,4 +87,12 @@ func New(cfg *grpcServer.Config, params CreateServerParams) (lifecycle.Runnable,
 	}
 
 	return runnable, nil
+}
+
+func replicaIdentityInterceptor(cfg *grpcServer.TLSConfig) grpc.UnaryServerInterceptor {
+	checkCertificate := cfg != nil && cfg.ClientAuth.Enabled
+	return grpcInterceptor.WithReplicaIdentity(
+		signerv2.SignerService_Sign_FullMethodName,
+		checkCertificate,
+	)
 }

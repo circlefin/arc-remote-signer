@@ -1,0 +1,170 @@
+syntax = "proto3";
+
+package arc.signer.v2;
+
+import "buf/validate/validate.proto";
+
+option go_package = "github.com/circlefin/arc-remote-signer/proto/pb/signerv2";
+
+service SignerService {
+  rpc PublicKey(PublicKeyRequest) returns (PublicKeyResponse) {}
+  // The service returns INVALID_ARGUMENT with "invalid watermark candidate".
+  // The service returns FAILED_PRECONDITION with "watermark violation".
+  // The service returns OUT_OF_RANGE with "watermark stale".
+  // The service returns ABORTED with "other node signed".
+  // The service returns INTERNAL with
+  // "watermark result indeterminate; retry the exact same request".
+  // The service returns INTERNAL with
+  // "watermark state corrupt; operator action required".
+  // The service returns INTERNAL with "watermark repository failure".
+  // The service does not send the request to the enclave after a repository
+  // failure. Version 2 does not call version 1 after a failure.
+  // With lease enforcement, the service returns PERMISSION_DENIED with
+  // "not lease holder" when the caller's replica name or session ID does not
+  // match the lease, or the lease has expired. No other error uses
+  // PERMISSION_DENIED. VALIDATOR_PROOF and TELEMETRY are exempt.
+  rpc Sign(SignRequest) returns (SignResponse) {}
+  // Gets or extends the lease. Each node calls this in both roles.
+  // Invalid identity or session data returns INVALID_ARGUMENT. A name outside
+  // the permitted list returns FAILED_PRECONDITION with "replica name not permitted".
+  // Storage failures return INTERNAL.
+  rpc AcquireOrRenewLease(AcquireOrRenewLeaseRequest) returns (AcquireOrRenewLeaseResponse) {}
+  // Frees only the caller's matching lease and session records.
+  // A repeated or late release changes nothing and returns OK.
+  // Invalid identity or session data returns INVALID_ARGUMENT.
+  // Storage failures return INTERNAL.
+  rpc ReleaseLease(ReleaseLeaseRequest) returns (ReleaseLeaseResponse) {}
+}
+
+message PublicKeyRequest {}
+
+message PublicKeyResponse {
+  bytes public_key = 1;
+  // attestation_document binds public_key to the Nitro enclave. It is empty
+  // when Nitro mode is disabled.
+  bytes attestation_document = 2;
+}
+
+enum MessageKind {
+  MESSAGE_KIND_UNSPECIFIED = 0;
+  // Prevote namespace.
+  MESSAGE_KIND_PREVOTE = 1;
+  // Precommit namespace.
+  MESSAGE_KIND_PRECOMMIT = 2;
+  // Proposal namespace.
+  MESSAGE_KIND_PROPOSAL = 3;
+  // Proposal-parts namespace.
+  MESSAGE_KIND_PROPOSAL_PARTS = 4;
+  // Outside the watermark; height and round must be absent.
+  MESSAGE_KIND_VALIDATOR_PROOF = 5;
+  // Telemetry does not use a watermark. Height and round must be absent.
+  // The message must have 49 bytes. The first 17 bytes must contain
+  // `arc/telemetry/v1\0`. The last 32 bytes must contain the digest.
+  MESSAGE_KIND_TELEMETRY = 6;
+  // Delegated authentication does not use a watermark. Height and round must
+  // be absent. The 130-byte message starts with `arc/auth/v1\0`, followed by
+  // the one-byte domain length (9), `arc-boost`, and the canonical body fields.
+  MESSAGE_KIND_DELEGATION = 7;
+}
+
+message SigningMetadata {
+  option (buf.validate.message).cel = {
+    id: "signing_metadata.watermarked_tuple"
+    message: "height and round are required for watermarked message kinds"
+    expression: "this.kind in [arc.signer.v2.MessageKind.MESSAGE_KIND_VALIDATOR_PROOF, arc.signer.v2.MessageKind.MESSAGE_KIND_TELEMETRY, arc.signer.v2.MessageKind.MESSAGE_KIND_DELEGATION] || (has(this.height) && has(this.round))"
+  };
+  option (buf.validate.message).cel = {
+    id: "signing_metadata.tupleless_kind"
+    message: "height and round must be absent for tuple-less message kinds"
+    expression: "!(this.kind in [arc.signer.v2.MessageKind.MESSAGE_KIND_VALIDATOR_PROOF, arc.signer.v2.MessageKind.MESSAGE_KIND_TELEMETRY, arc.signer.v2.MessageKind.MESSAGE_KIND_DELEGATION]) || (!has(this.height) && !has(this.round))"
+  };
+
+  MessageKind kind = 1 [(buf.validate.field).enum = {
+    defined_only: true
+    not_in: [0]
+  }];
+  optional uint64 height = 2 [(buf.validate.field).uint64.gt = 0];
+  optional uint64 round = 3;
+}
+
+message SignRequest {
+  bytes message = 1 [(buf.validate.field).bytes.min_len = 1];
+  SigningMetadata metadata = 2 [(buf.validate.field).required = true];
+  // Keep these constraints in sync with replica.NewID.
+  string replica_name = 3 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 255
+    pattern: "^[!-~]+$"
+  }];
+  // Process identity shared with the lease RPCs. May be omitted in phase 1.
+  // Phase 2 requires a non-empty value that matches the unexpired lease.
+  bytes session_id = 4 [(buf.validate.field).bytes.max_len = 64];
+}
+
+message SignResponse {
+  bytes signature = 1;
+}
+
+// Identifies a process and reports its consensus progress to the signer.
+message AcquireOrRenewLeaseRequest {
+  // Keep these constraints in sync with SignRequest.replica_name and replica.NewID.
+  string replica_name = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 255
+    pattern: "^[!-~]+$"
+  }];
+  // Random, non-empty identity created at each process start.
+  bytes session_id = 2 [(buf.validate.field).bytes = {
+    min_len: 1
+    max_len: 64
+  }];
+  // The last decided height. Zero is valid before the first decision.
+  uint64 decided_height = 3;
+}
+
+enum LeaseRefusal {
+  // Used only when the lease is granted.
+  LEASE_REFUSAL_UNSPECIFIED = 0;
+  LEASE_REFUSAL_HELD_BY_OTHER = 1;
+  // The caller is in its revocation period. Takes priority over HELD_BY_OTHER.
+  LEASE_REFUSAL_REVOKED = 2;
+  reserved 3;
+  reserved "LEASE_REFUSAL_REVOKED_STALLED", "LEASE_REFUSAL_REVOCATION_PERIOD";
+  // Another session used this replica_name within the last TTL.
+  LEASE_REFUSAL_DUPLICATE_NAME = 4;
+}
+
+// The highest signed height across all kinds, and the replica that signed it.
+message HeightOwner {
+  uint64 height = 1;
+  string replica_name = 2;
+}
+
+message AcquireOrRenewLeaseResponse {
+  bool granted = 1;
+  // Configured lease duration in milliseconds, also returned on refusal.
+  // This is not the current holder's remaining lease time.
+  uint64 ttl_ms = 2;
+  // UNSPECIFIED only when granted is true; a refusal reason otherwise.
+  LeaseRefusal refusal = 3;
+  // Present only for REVOKED: milliseconds until the revocation period ends.
+  optional uint64 retry_after_ms = 4;
+  // Absent when the validator has no watermark record.
+  optional HeightOwner height_owner = 5;
+}
+
+message ReleaseLeaseRequest {
+  // Keep these constraints in sync with SignRequest.replica_name and replica.NewID.
+  string replica_name = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 255
+    pattern: "^[!-~]+$"
+  }];
+  // The session that releases its own lease. An old session cannot free a new lease.
+  bytes session_id = 2 [(buf.validate.field).bytes = {
+    min_len: 1
+    max_len: 64
+  }];
+}
+
+message ReleaseLeaseResponse {}

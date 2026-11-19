@@ -258,12 +258,11 @@ func (p *proxy) acceptLoop(ctx context.Context, sl *serviceListener) {
 				return
 			default:
 			}
-			// Accept failures outside shutdown are terminal for this
-			// service loop — the listener will no longer accept new
-			// connections until the process restarts. Log at error level so
-			// the condition surfaces in alerting; transient-error retry
-			// can be revisited once CCHAIN-2027 brings a real consumer
-			// and we have observability on actual accept failure modes.
+			// An Accept error stops this service loop unless Shutdown causes the error.
+			// The listener cannot accept new connections until the process restarts.
+			// Log the error. Monitoring can then detect the stopped service loop.
+			// Collect data about Accept errors.
+			// Add retry logic only when a production consumer needs retry logic.
 			p.logger.ErrorErr(ctx, "accept failed (service loop exiting)", err, logging.Entries{
 				"service": sl.Name,
 			})

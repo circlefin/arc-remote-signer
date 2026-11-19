@@ -8,6 +8,7 @@ import (
 	context "context"
 	reflect "reflect"
 
+	kms "github.com/aws/aws-sdk-go-v2/service/kms"
 	gomock "github.com/golang/mock/gomock"
 )
 
@@ -65,4 +66,67 @@ func (m *MockProvider) GenerateDataKey(ctx context.Context) ([]byte, []byte, []b
 func (mr *MockProviderMockRecorder) GenerateDataKey(ctx interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GenerateDataKey", reflect.TypeOf((*MockProvider)(nil).GenerateDataKey), ctx)
+}
+
+// MockkmsAPI is a mock of kmsAPI interface.
+type MockkmsAPI struct {
+	ctrl     *gomock.Controller
+	recorder *MockkmsAPIMockRecorder
+}
+
+// MockkmsAPIMockRecorder is the mock recorder for MockkmsAPI.
+type MockkmsAPIMockRecorder struct {
+	mock *MockkmsAPI
+}
+
+// NewMockkmsAPI creates a new mock instance.
+func NewMockkmsAPI(ctrl *gomock.Controller) *MockkmsAPI {
+	mock := &MockkmsAPI{ctrl: ctrl}
+	mock.recorder = &MockkmsAPIMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockkmsAPI) EXPECT() *MockkmsAPIMockRecorder {
+	return m.recorder
+}
+
+// Decrypt mocks base method.
+func (m *MockkmsAPI) Decrypt(arg0 context.Context, arg1 *kms.DecryptInput, arg2 ...func(*kms.Options)) (*kms.DecryptOutput, error) {
+	m.ctrl.T.Helper()
+	varargs := []interface{}{arg0, arg1}
+	for _, a := range arg2 {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "Decrypt", varargs...)
+	ret0, _ := ret[0].(*kms.DecryptOutput)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Decrypt indicates an expected call of Decrypt.
+func (mr *MockkmsAPIMockRecorder) Decrypt(arg0, arg1 interface{}, arg2 ...interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]interface{}{arg0, arg1}, arg2...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Decrypt", reflect.TypeOf((*MockkmsAPI)(nil).Decrypt), varargs...)
+}
+
+// GenerateDataKey mocks base method.
+func (m *MockkmsAPI) GenerateDataKey(arg0 context.Context, arg1 *kms.GenerateDataKeyInput, arg2 ...func(*kms.Options)) (*kms.GenerateDataKeyOutput, error) {
+	m.ctrl.T.Helper()
+	varargs := []interface{}{arg0, arg1}
+	for _, a := range arg2 {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "GenerateDataKey", varargs...)
+	ret0, _ := ret[0].(*kms.GenerateDataKeyOutput)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GenerateDataKey indicates an expected call of GenerateDataKey.
+func (mr *MockkmsAPIMockRecorder) GenerateDataKey(arg0, arg1 interface{}, arg2 ...interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]interface{}{arg0, arg1}, arg2...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GenerateDataKey", reflect.TypeOf((*MockkmsAPI)(nil).GenerateDataKey), varargs...)
 }

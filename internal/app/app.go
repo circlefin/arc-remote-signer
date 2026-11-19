@@ -16,17 +16,21 @@ package app
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/circlefin/arc-remote-signer/internal/app/metrics"
 	enclaveProvider "github.com/circlefin/arc-remote-signer/internal/app/provider/enclave"
 	"github.com/circlefin/arc-remote-signer/internal/app/provider/secrets"
 	"github.com/circlefin/arc-remote-signer/internal/app/public"
+	watermarkrepository "github.com/circlefin/arc-remote-signer/internal/app/repository/watermark"
 	signerv1 "github.com/circlefin/arc-remote-signer/internal/app/service/signer/v1"
+	signerv2service "github.com/circlefin/arc-remote-signer/internal/app/service/signer/v2"
 	"github.com/circlefin/arc-remote-signer/internal/common/lifecycle"
 	"github.com/circlefin/arc-remote-signer/internal/common/logging"
 	"github.com/circlefin/arc-remote-signer/internal/common/metric"
 	"github.com/circlefin/arc-remote-signer/internal/common/telemetry"
+	"github.com/circlefin/arc-remote-signer/internal/common/watermark"
 	"github.com/circlefin/arc-remote-signer/proto/pb"
 	"gopkg.in/DataDog/dd-trace-go.v1/profiler"
 )
@@ -36,6 +40,8 @@ type metricProviders struct {
 	api        metric.APIStatsService
 	prometheus *metric.Prometheus
 }
+
+type watermarkRepositoryFactory func(aws.Config, []byte) (watermark.OwnedAdvancer, error)
 
 var _logger *logging.Logger
 
@@ -99,7 +105,11 @@ func Run(cfg *Config) {
 		panic(err)
 	}
 
+	// The host reads Secrets Manager before it initializes the enclave. The
+	// stored envelope or configured algorithm selects the initialization path.
 	secretPvd := secrets.New(awsConfig)
+
+	logger.Info(ctx, "initializing the services...", nil)
 	initializeKey := newInitializeKeyFunc(
 		cfg.Provider.Enclave,
 		enclavePvd,
@@ -108,11 +118,30 @@ func Run(cfg *Config) {
 		cfg.Provider.AWSKMS.Localstack.Enabled,
 		logger,
 	)
-
-	logger.Info(ctx, "initializing the services...", nil)
-	signerSvc, err := signerv1.New(ctx, cfg.Service.Signer, secretPvd, enclavePvd, initializeKey)
+	signerSvc, err := signerv1.New(
+		ctx,
+		cfg.Service.Signer,
+		secretPvd,
+		enclavePvd,
+		initializeKey,
+	)
 	if err != nil {
 		logger.ErrorErr(ctx, "failed to initialize the signer service", err, nil)
+		panic(err)
+	}
+	validatorPublicKey, err := signerSvc.ValidatorPublicKey()
+	if err != nil {
+		logger.ErrorErr(ctx, "failed to get the validator public key", err, nil)
+		panic(err)
+	}
+	signerV2Svc, err := newSignerV2Service(
+		signerSvc,
+		awsConfig,
+		validatorPublicKey,
+		newWatermarkRepository,
+	)
+	if err != nil {
+		logger.ErrorErr(ctx, "failed to initialize the signer v2 service", err, nil)
 		panic(err)
 	}
 
@@ -128,6 +157,7 @@ func Run(cfg *Config) {
 		Env:         cfg.Env,
 		APIStatsSvc: appMetricProviders.api,
 		SignerSvc:   signerSvc,
+		SignerV2Svc: signerV2Svc,
 		Prometheus:  appMetricProviders.prometheus,
 	})
 	if err != nil {
@@ -151,30 +181,56 @@ func Run(cfg *Config) {
 }
 
 func newInitializeKeyFunc(
-	cfg *enclaveProvider.ProviderConfig,
+	enclaveCfg *enclaveProvider.ProviderConfig,
 	enclavePvd pb.EnclaveServiceClient,
 	awsConfig aws.Config,
 	kmsKeyArns []string,
 	kmsLocalstackEnabled bool,
 	logger *logging.Logger,
-) func(context.Context, *pb.SecretEnvelope, pb.Algorithm) (*pb.InitializeResponse, error) {
+) signerv1.InitializeKeyFunc {
 	return func(
 		ctx context.Context,
 		existingKey *pb.SecretEnvelope,
 		generateNew pb.Algorithm,
 	) (*pb.InitializeResponse, error) {
-		startupCtx, cancel := context.WithTimeout(ctx, cfg.StartupTimeout())
+		initCtx, cancel := context.WithTimeout(ctx, enclaveCfg.StartupTimeout())
 		defer cancel()
+
+		logger.Info(initCtx, "initializing the enclave via Initialize RPC...", nil)
 		return initializeEnclave(
-			startupCtx,
+			initCtx,
 			enclavePvd,
 			awsConfig,
 			kmsKeyArns,
 			kmsLocalstackEnabled,
-			enclaveKeySource{existingKey: existingKey, generateNew: generateNew},
+			enclaveKeySource{
+				existingKey: existingKey,
+				generateNew: generateNew,
+			},
 			logger,
 		)
 	}
+}
+
+func newWatermarkRepository(cfg aws.Config, validatorPublicKey []byte) (watermark.OwnedAdvancer, error) {
+	return watermarkrepository.New(cfg, validatorPublicKey)
+}
+
+func newSignerV2Service(
+	base signerv2service.BaseSigner,
+	awsConfig aws.Config,
+	validatorPublicKey []byte,
+	repositoryFactory watermarkRepositoryFactory,
+) (*signerv2service.Service, error) {
+	repository, err := repositoryFactory(awsConfig, validatorPublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("create watermark repository: %w", err)
+	}
+	service, err := signerv2service.New(base, repository)
+	if err != nil {
+		return nil, fmt.Errorf("create signer v2 service: %w", err)
+	}
+	return service, nil
 }
 
 func initializeMetricsProviders(ctx context.Context, metricsCfg *metric.Config) metricProviders {

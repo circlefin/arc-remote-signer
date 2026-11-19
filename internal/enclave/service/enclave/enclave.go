@@ -17,7 +17,10 @@ package enclave
 import (
 	"context"
 	"errors"
+	"sync"
 
+	"github.com/circlefin/arc-remote-signer/internal/common/signing"
+	"github.com/circlefin/arc-remote-signer/internal/common/watermark"
 	enclaveCrypto "github.com/circlefin/arc-remote-signer/internal/enclave/common/crypto"
 	"github.com/circlefin/arc-remote-signer/internal/enclave/provider/awskms"
 	"github.com/circlefin/arc-remote-signer/internal/enclave/provider/enclave"
@@ -34,6 +37,9 @@ type Service struct {
 	kmsFactory          awskms.Factory
 	awsproxyEndpoint    string
 	gate                *initGate
+	watermarkMu         sync.Mutex
+	// watermarks is process-local by design and starts empty with each Service.
+	watermarks map[string]*watermark.MemoryRepository
 }
 
 func (s *Service) activeKey() (enclaveCrypto.Key, error) {
@@ -47,9 +53,10 @@ func (s *Service) activeKey() (enclaveCrypto.Key, error) {
 	return state.key, nil
 }
 
-// New creates a new enclave service instance. Each initialization attempt
-// creates an ephemeral KMS client through awsproxyEndpoint. The attempt
-// completes key generation or recovery before it publishes the Ready state.
+// New creates a new enclave service instance. The init gate's runInit
+// callback exercises AWS KMS through awsproxyEndpoint when the host
+// invokes Initialize, using the supplied factory to build an ephemeral
+// KMS client.
 //
 // nitroEnclaveEnabled controls the proxy transport and the KMS TLS strategy.
 // Standard AWS KMS keeps the AWS endpoint and uses end-to-end TLS. LocalStack
@@ -66,6 +73,7 @@ func New(
 		enclavePvd:          enclavePvd,
 		kmsFactory:          awskmsFactory,
 		awsproxyEndpoint:    awsproxyEndpoint,
+		watermarks:          make(map[string]*watermark.MemoryRepository),
 	}
 	s.gate = newInitGate(s.runInit)
 	return s
@@ -81,31 +89,21 @@ func New(
 func newWithGate(
 	nitroEnclaveEnabled bool,
 	enclavePvd enclave.Provider,
-	runInit func(context.Context, *pb.InitializeRequest) error,
+	runInit runInitFunc,
 ) *Service {
-	wrappedRunInit := func(ctx context.Context, req *pb.InitializeRequest) (*readyState, error) {
-		if err := runInit(ctx, req); err != nil {
-			return nil, err
-		}
-		return &readyState{
-			response: &pb.InitializeResponse{PublicKey: []byte("test-public-key")},
-		}, nil
-	}
 	return &Service{
 		nitroEnclaveEnabled: nitroEnclaveEnabled,
 		enclavePvd:          enclavePvd,
-		gate:                newInitGate(wrappedRunInit),
+		gate:                newInitGate(runInit),
+		watermarks:          make(map[string]*watermark.MemoryRepository),
 	}
 }
 
-// Initialize completes one key transaction. Concurrent calls share one
-// attempt. After success, matching requests receive cloned responses. An
-// existing-key request can replay the envelope from a successful generation
-// response. Other key sources fail. A failed attempt does not publish the
-// Ready state, and a later call can retry.
-//
-// Each attempt creates an ephemeral AWS KMS client through the injected
-// factory. The attempt uses the client only for key generation or recovery.
+// Initialize recovers or generates one key. Concurrent calls with the same
+// source use one operation. A later call with the same source gets the stored
+// response. After the Ready state is set, a call with a different source fails
+// without a new KMS call. If the shared initialization operation fails, it does
+// not set the Ready state. Caller cancellation stops only that caller's wait.
 //
 // Note: AwsCredentials fields arrive as proto-generated strings, which
 // Go cannot zero out. Documenting the limitation here; switching the
@@ -182,13 +180,8 @@ func toStatusError(prefix string, err error) error {
 	return status.Errorf(codes.Internal, "%s: %v", prefix, err)
 }
 
-// runInitStatusError maps a runInit error to a gRPC status. It shares
-// toStatusError with the envelope path (kmsStatusError) so the Initialize and
-// read/generate RPCs surface context/KMS errors identically. runInit is the
-// only caller and returns raw (fmt.Errorf-wrapped) errors — unlike
-// generateEnvelope, which returns straight to its RPC and so maps to a status
-// itself via kmsStatusError — so this is the single mapping point for the
-// Initialize path and no prefix is added here.
+// runInitStatusError maps a runInit error to a gRPC status. runInit returns raw
+// errors. runInitStatusError is the only mapping point for Initialize.
 func runInitStatusError(err error) error {
 	return toStatusError("", err)
 }
@@ -202,10 +195,11 @@ func (s *Service) GenerateKey(_ context.Context, req *pb.GenerateKeyRequest) (*p
 	if _, err := toAlgorithm(req.Algorithm); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	return nil, status.Error(codes.FailedPrecondition, "key generation is available only through Initialize")
+	return nil, status.Error(codes.FailedPrecondition, "use Initialize to generate a key")
 }
 
-// GetPublicKey returns and attests the installed Ready-state key.
+// GetPublicKey returns the public key from the Ready state. In Nitro mode, it
+// also creates a new attestation document.
 func (s *Service) GetPublicKey(_ context.Context, _ *pb.GetPublicKeyRequest) (*pb.GetPublicKeyResponse, error) {
 	secretKey, err := s.activeKey()
 	if err != nil {
@@ -234,11 +228,23 @@ func (s *Service) GetPublicKey(_ context.Context, _ *pb.GetPublicKeyRequest) (*p
 	}, nil
 }
 
-// SignMessage signs with the installed Ready-state key.
-func (s *Service) SignMessage(_ context.Context, req *pb.SignMessageRequest) (*pb.SignMessageResponse, error) {
+// SignMessage signs the request message with the key from the Ready state.
+func (s *Service) SignMessage(ctx context.Context, req *pb.SignMessageRequest) (*pb.SignMessageResponse, error) {
+	if err := signing.ValidateMessage(req.GetMetadata(), req.GetMessage()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	secretKey, err := s.activeKey()
 	if err != nil {
 		return nil, err
+	}
+	if req.GetMetadata() != nil {
+		publicKey, err := secretKey.PublicKey()
+		if err != nil {
+			return nil, status.Error(codes.Internal, "failed to get public key")
+		}
+		if err := s.enforceWatermark(ctx, publicKey, req.GetMessage(), req.GetMetadata()); err != nil {
+			return nil, err
+		}
 	}
 
 	signature, err := secretKey.SignMessage(req.Message)

@@ -72,8 +72,8 @@ func LoadConfig(cfg ApplicationConfig, cfgFile string) {
 
 	// Unmarshal into config struct
 	if err := v.Unmarshal(cfg, func(decoderConfig *mapstructure.DecoderConfig) {
-		// Clear maps before decode to prevent duplicate normalized method-map
-		// keys from defaults and file or environment input.
+		// Defaults are already merged into Viper. Clear destination maps so
+		// Viper's normalized keys replace, rather than duplicate, default keys.
 		decoderConfig.ZeroFields = true
 	}); err != nil {
 		log.Fatalf("Unable to decode config: %v", err)

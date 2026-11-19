@@ -61,8 +61,7 @@ func InsecureDialOptions(cfg Config, extraInterceptors ...grpc.UnaryClientInterc
 	}
 }
 
-// unaryMethodTimeoutInterceptor applies the configured per-method timeout or
-// the global request timeout to each unary RPC.
+// unaryMethodTimeoutInterceptor applies method-specific or default client request deadlines.
 func unaryMethodTimeoutInterceptor(cfg Config) grpc.UnaryClientInterceptor {
 	return func(
 		ctx context.Context,

@@ -113,17 +113,21 @@ func TestNewRunInit_Integration_InvalidEndpoint(t *testing.T) {
 		"SDK transport failure must wrap a net.Error so awskms.StatusFromError's net.Error branch fires in production")
 }
 
-// TestService_Envelope_Integration_GenerateThenSign generates a key
-// in-enclave via a real LocalStack KMS GenerateDataKey, then signs with the
-// returned SecretEnvelope end to end and verifies the signature.
-func TestService_Envelope_Integration_GenerateThenSign(t *testing.T) {
+// TestService_Initialize_Integration_GenerateThenSign generates a key with
+// Initialize. It then signs with the key from the Ready state. The test verifies
+// the signature.
+func TestService_Initialize_Integration_GenerateThenSign(t *testing.T) {
 	ctx := context.Background()
 	s := newServiceForTest(t, false, nil, newLocalstackFactory(t), localstackEndpoint)
 	initResp, err := s.Initialize(ctx, validIntegrationReq(t, localstackKmsArn))
 	require.NoError(t, err, "Initialize must succeed against LocalStack")
+	require.NotEmpty(t, initResp.PublicKey)
+	require.NotNil(t, initResp.SecretEnvelope)
 
 	msg := []byte("integration-message")
-	sig, err := s.SignMessage(ctx, &pb.SignMessageRequest{Message: msg})
+	sig, err := s.SignMessage(ctx, &pb.SignMessageRequest{
+		Message: msg,
+	})
 	require.NoError(t, err)
 	require.NotEmpty(t, sig.Signature)
 

@@ -35,6 +35,7 @@ type integrationTestSuite struct {
 
 	client        pb.EnclaveServiceClient
 	conn          *grpc.ClientConn
+	testEnvelope  *pb.SecretEnvelope
 	testingPubKey []byte
 }
 
@@ -45,13 +46,10 @@ func (suite *integrationTestSuite) SetupSuite() {
 	suite.client = client
 	suite.conn = conn
 
-	// The enclave now mints its own data key via KMS, so it must be
-	// initialized with credentials and the LocalStack KMS ARN before any
-	// GenerateKey/read RPC. Initialize is idempotent, so running it once per
-	// suite is sufficient. Credentials match the LocalStack values in
-	// docker-compose; session_token is a placeholder to satisfy the proto's
-	// min_len validation (LocalStack ignores it).
-	resp, err := suite.client.Initialize(context.Background(), &pb.InitializeRequest{
+	// Initialize is the only key installation path. Credentials match the
+	// LocalStack values in docker-compose. session_token is a placeholder for
+	// the proto min_len rule. LocalStack ignores session_token.
+	result, err := suite.client.Initialize(context.Background(), &pb.InitializeRequest{
 		Credentials: &pb.AwsCredentials{
 			AccessKeyId:     "foo",
 			SecretAccessKey: "bar",
@@ -65,8 +63,15 @@ func (suite *integrationTestSuite) SetupSuite() {
 		},
 	})
 	suite.Require().NoError(err)
-	suite.Require().NotNil(resp)
-	suite.testingPubKey = resp.PublicKey
+	suite.Require().NotNil(result)
+
+	suite.testEnvelope = result.SecretEnvelope
+	suite.testingPubKey = result.PublicKey
+	suite.Require().NotEmpty(suite.testingPubKey)
+	suite.Require().NotNil(suite.testEnvelope)
+	suite.Require().NotEmpty(suite.testEnvelope.KmsEncryptedDataKey)
+	suite.Require().NotEmpty(suite.testEnvelope.EncryptedPrivateKey)
+	suite.Require().NotEmpty(suite.testEnvelope.Nonce)
 }
 
 func (suite *integrationTestSuite) TearDownSuite() {
@@ -75,7 +80,7 @@ func (suite *integrationTestSuite) TearDownSuite() {
 }
 
 func (suite *integrationTestSuite) TestGenerateKey() {
-	suite.Run("disabled after initialization", func() {
+	suite.Run("disabled", func() {
 		result, err := suite.client.GenerateKey(context.Background(), &pb.GenerateKeyRequest{
 			Algorithm: pb.Algorithm_ALGORITHM_ED25519,
 		})

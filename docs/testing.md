@@ -10,13 +10,35 @@ For the contribution workflow that wraps these commands, see [development.md](de
 |---------|-------|-------|
 | `make test` | Unit tests + lint | Also checks development and production image contracts |
 | `make test-it` | Unit + integration | Starts localstack via `make up` |
-| `make smoke` | Smoke (end-to-end) | Starts localstack and launches `bin/app` automatically (via `scripts/smoke.sh`) |
+| `make smoke` | Smoke (end-to-end) | Starts LocalStack and launches `bin/app`. The test restarts the app and verifies the durable watermark for version 2. |
 | `make test-all` | All local test targets | Combines the above; does not include CI Nitro EIF image validation |
 
 Test files are co-located with source and use build tags to control scope:
 
 - Integration tests: `//go:build integration` (files named `*_integration_test.go`, e.g. `awskms_integration_test.go`)
 - Smoke tests: `//go:build smoke`, located in `internal/smoke/`
+
+## Signer v2 smoke contract
+
+`internal/smoke/public/public_v2_test.go` is the shared public v2 entry point for
+`smoke` and `smoke,nitro_smoke`. `TestPublicV2` checks signing and refusal
+behavior, cross-kind ordering, height ownership, and durable restart state.
+Local and Nitro smoke read existing state without deleting it. New signing scenarios
+advance above the highest stored height across all four kinds.
+VALIDATOR_PROOF, TELEMETRY, and DELEGATION signatures must preserve the aggregate and legacy
+state.
+
+Local smoke repeats `TestPublicV2` against the same host before the restart.
+This checks that the cached repository and retained state support another run.
+The smoke launchers then restart the signer and run `TestPublicV2` again
+with `SMOKE_VERIFY_RESTART=true`. This verifies stale rejection, exact retry,
+conflict rejection, and a new advance against the persisted state.
+
+Nitro smoke uses the dev signer role for `dynamodb:GetItem` and
+`dynamodb:UpdateItem`. Smoke EIF jobs share one concurrency group because every
+run uses the same signer key and aggregate watermark state. One job runs while up to 100
+jobs wait. A job beyond this limit is cancelled, fails closed, and must run
+again.
 
 ## CI-only EIF Image Validation
 
@@ -29,11 +51,16 @@ settings are absent. The CI-only wrapper then starts the same `docker/run.sh`
 launcher with conflicting development settings. The smoke test includes image
 startup, VSOCK communication, KMS recipient encryption, and signing.
 
+After the behavior phase, the script stops and removes the first signer
+container and terminates its EIF. It then starts a new container and EIF with
+the same validator key before running the restart phase. A failed stop or
+second startup fails the job.
+
 The test uses a CI-only shell wrapper to add the Nitro CLI `--debug-mode` option.
 The production launcher does not accept this option. Debug mode does not change
-the EIF bytes or create a second EIF. The test does not validate a production
-KMS policy that uses PCR values. A production-mode test is necessary for each
-PCR policy change.
+the EIF bytes or produce a separate EIF artifact. The test does not validate a
+production KMS policy that uses PCR values. A production-mode test is necessary
+for each PCR policy change.
 
 For an internal release, the pipeline runs the same test on the
 `signer-with-enclave` Docker archive. The pipeline publishes the Docker archive

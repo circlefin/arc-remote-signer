@@ -181,21 +181,24 @@ func TestNewInsecureClientConn_MethodTimeoutOverridesDefault(t *testing.T) {
 	defer stop()
 
 	conn, err := NewInsecureClientConn(addr, Config{
-		RequestTimeoutMS: 5000,
+		RequestTimeoutMS: 5000, // global is 5s
 		Methods: map[string]MethodConfig{
-			"Check": {TimeoutMS: 10},
+			"Check": {TimeoutMS: 10}, // method specific is 10ms
 		},
-		Retry: &RetryConfig{MaxAttempts: 0},
+		Retry: &RetryConfig{
+			MaxAttempts: 0,
+		},
 	})
-	require.NoError(t, err)
+	require.NoError(t, err, "failed to create client conn")
 	t.Cleanup(func() { _ = conn.Close() })
 
 	client := grpcHealthV1.NewHealthClient(conn)
 	start := time.Now()
 	_, err = client.Check(context.Background(), &grpcHealthV1.HealthCheckRequest{})
+	elapsed := time.Since(start)
 
-	require.Equal(t, codes.DeadlineExceeded, status.Code(err))
-	require.Less(t, time.Since(start), time.Second)
+	require.Equal(t, codes.DeadlineExceeded, status.Code(err), "expected deadline exceeded")
+	require.Less(t, elapsed, 1000*time.Millisecond, "should use method timeout (10ms), not default timeout (5s)")
 }
 
 func TestNewInsecureClientConn_PreservesShorterCallerDeadline(t *testing.T) {
@@ -208,19 +211,23 @@ func TestNewInsecureClientConn_PreservesShorterCallerDeadline(t *testing.T) {
 		Methods: map[string]MethodConfig{
 			"Check": {TimeoutMS: 5000},
 		},
-		Retry: &RetryConfig{MaxAttempts: 0},
+		Retry: &RetryConfig{
+			MaxAttempts: 0,
+		},
 	})
-	require.NoError(t, err)
+	require.NoError(t, err, "failed to create client conn")
 	t.Cleanup(func() { _ = conn.Close() })
 
 	client := grpcHealthV1.NewHealthClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
+
 	start := time.Now()
 	_, err = client.Check(ctx, &grpcHealthV1.HealthCheckRequest{})
+	elapsed := time.Since(start)
 
-	require.Equal(t, codes.DeadlineExceeded, status.Code(err))
-	require.Less(t, time.Since(start), time.Second)
+	require.Equal(t, codes.DeadlineExceeded, status.Code(err), "expected deadline exceeded")
+	require.Less(t, elapsed, 1000*time.Millisecond, "should respect caller's 10ms deadline")
 }
 
 func TestNewInsecureClientConn_MethodTimeoutCanExceedDefault(t *testing.T) {
@@ -241,12 +248,15 @@ func TestNewInsecureClientConn_MethodTimeoutCanExceedDefault(t *testing.T) {
 	client := grpcHealthV1.NewHealthClient(conn)
 	_, err = client.Check(context.Background(), &grpcHealthV1.HealthCheckRequest{})
 
-	require.NoError(t, err)
+	require.NoError(t, err, "method timeout must override a shorter default timeout")
 	require.Equal(t, 1, svc.Calls())
 }
 
 func TestNewInsecureClientConn_RetriesShareMethodTimeout(t *testing.T) {
-	svc := &testHealthServer{failUntil: 10, responseDelay: 20 * time.Millisecond}
+	svc := &testHealthServer{
+		failUntil:     10,
+		responseDelay: 20 * time.Millisecond,
+	}
 	addr, stop := startHealthServer(t, svc)
 	defer stop()
 
@@ -263,9 +273,10 @@ func TestNewInsecureClientConn_RetriesShareMethodTimeout(t *testing.T) {
 	client := grpcHealthV1.NewHealthClient(conn)
 	start := time.Now()
 	_, err = client.Check(context.Background(), &grpcHealthV1.HealthCheckRequest{})
+	elapsed := time.Since(start)
 
 	require.Equal(t, codes.DeadlineExceeded, status.Code(err))
-	require.Less(t, time.Since(start), 150*time.Millisecond)
+	require.Less(t, elapsed, 150*time.Millisecond, "retries must share one total method deadline")
 }
 
 func TestNewInsecureClientConn_MethodMaxAttemptsOverridesDefault(t *testing.T) {
@@ -276,7 +287,10 @@ func TestNewInsecureClientConn_MethodMaxAttemptsOverridesDefault(t *testing.T) {
 	conn, err := NewInsecureClientConn(addr, Config{
 		RequestTimeoutMS: 1000,
 		Methods: map[string]MethodConfig{
-			"Check": {TimeoutMS: 1000, MaxAttempts: 1},
+			"Check": {
+				TimeoutMS:   1000,
+				MaxAttempts: 1,
+			},
 		},
 		Retry: &RetryConfig{MaxAttempts: 3},
 	})
@@ -287,7 +301,7 @@ func TestNewInsecureClientConn_MethodMaxAttemptsOverridesDefault(t *testing.T) {
 	_, err = client.Check(context.Background(), &grpcHealthV1.HealthCheckRequest{})
 
 	require.Equal(t, codes.Unavailable, status.Code(err))
-	require.Equal(t, 1, svc.Calls())
+	require.Equal(t, 1, svc.Calls(), "method policy must prevent automatic retries")
 }
 
 func TestResolveMethodTimeout_MatchesLowercaseConfigKey(t *testing.T) {

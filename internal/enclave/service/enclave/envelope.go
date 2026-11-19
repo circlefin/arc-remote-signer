@@ -28,15 +28,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// kmsStatusError maps a raw KMS or enclave SDK error from the envelope read/generate
-// path to a gRPC status, prefixed with the call site (e.g. "kms decrypt data
-// key") for context. It delegates to toStatusError so this path surfaces the
-// same context-cancel/deadline and awskms.StatusFromError mapping as the
-// Initialize path (runInitStatusError).
-func kmsStatusError(prefix string, err error) error {
-	return toStatusError(prefix, err)
-}
-
 func fingerprintKeySource(req *pb.InitializeRequest) (keySourceFingerprint, error) {
 	var parts [][]byte
 	switch source := req.GetKeySource().(type) {
@@ -84,7 +75,7 @@ func (s *Service) decryptDataKey(
 	}
 	plaintext, ciphertextForRecipient, err := pvd.Decrypt(ctx, kmsEncryptedDataKey)
 	if err != nil {
-		return nil, kmsStatusError("kms decrypt data key", err)
+		return nil, fmt.Errorf("kms decrypt data key: %w", err)
 	}
 	if s.nitroEnclaveEnabled {
 		if s.enclavePvd == nil {

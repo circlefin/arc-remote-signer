@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	grpcClient "github.com/circlefin/arc-remote-signer/internal/common/grpc/client"
+	"github.com/circlefin/arc-remote-signer/internal/common/grpc/client"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,7 +45,7 @@ func TestNewProviderConfig_Defaults(t *testing.T) {
 func TestProviderConfig_StartupTimeoutUsesIndependentTotalBudget(t *testing.T) {
 	cfg := NewProviderConfig()
 	cfg.StartupTimeoutMS = 1250
-	cfg.Client.Methods["initialize"] = grpcClient.MethodConfig{TimeoutMS: 60000}
+	cfg.Client.Methods["initialize"] = client.MethodConfig{TimeoutMS: 60000}
 
 	require.Equal(t, 1250*time.Millisecond, cfg.StartupTimeout())
 }

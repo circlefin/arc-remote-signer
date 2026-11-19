@@ -16,6 +16,7 @@ package enclave
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -34,9 +35,7 @@ import (
 )
 
 // EnclaveServiceTestSuite covers request validation, the Initialize gate, and
-// the pure helpers. The SecretEnvelope generate/read data paths (KMS decrypt,
-// caching, Nitro in-process RSA decrypt) are covered in envelope_test.go against the
-// fakeKmsProvider seam.
+// the pure helpers. envelope_test.go covers the SecretEnvelope data path.
 type EnclaveServiceTestSuite struct {
 	suite.Suite
 	ctrl    *gomock.Controller
@@ -72,6 +71,15 @@ func (s *EnclaveServiceTestSuite) TestGenerateKey_InvalidAlgorithm() {
 	s.Nil(resp)
 	s.Error(err)
 	s.Equal(codes.InvalidArgument, status.Code(err))
+}
+
+func (s *EnclaveServiceTestSuite) TestHashKeySourceFields_DeterministicAndUnique() {
+	k1 := hashKeySourceFields([]byte("a"), []byte("b"))
+	k2 := hashKeySourceFields([]byte("a"), []byte("b"))
+	k3 := hashKeySourceFields([]byte("ab"))
+
+	s.Equal(k1, k2)
+	s.NotEqual(k1, k3)
 }
 
 func (s *EnclaveServiceTestSuite) TestToAlgorithm() {
@@ -128,7 +136,18 @@ func (s *EnclaveServiceTestSuite) newUninitializedService(
 	runInit func(context.Context, *pb.InitializeRequest) error,
 ) *Service {
 	s.T().Helper()
-	return newWithGate(false, s.enclave, runInit)
+	return newWithGate(
+		false,
+		s.enclave,
+		func(ctx context.Context, req *pb.InitializeRequest) (*readyState, error) {
+			if err := runInit(ctx, req); err != nil {
+				return nil, err
+			}
+			return &readyState{
+				response: &pb.InitializeResponse{PublicKey: []byte("test-public-key")},
+			}, nil
+		},
+	)
 }
 
 // TestInitialize_RequestValidation covers the synchronous validation
@@ -199,8 +218,8 @@ func (s *EnclaveServiceTestSuite) TestInitialize_RequestValidation() {
 	}
 }
 
-// TestInitialize_HappyPath verifies a single successful Initialize call
-// latches the gate and returns an empty response.
+// TestInitialize_HappyPath verifies that one successful Initialize call sets
+// the Ready state. The call returns the public key.
 func (s *EnclaveServiceTestSuite) TestInitialize_HappyPath() {
 	var calls atomic.Int32
 	svc := s.newUninitializedService(func(context.Context, *pb.InitializeRequest) error {
@@ -217,10 +236,16 @@ func (s *EnclaveServiceTestSuite) TestInitialize_HappyPath() {
 
 func (s *EnclaveServiceTestSuite) TestInitialize_NitroRejectsLocalstack() {
 	var called atomic.Bool
-	svc := newWithGate(true, s.enclave, func(context.Context, *pb.InitializeRequest) error {
-		called.Store(true)
-		return nil
-	})
+	svc := newWithGate(
+		true,
+		s.enclave,
+		func(context.Context, *pb.InitializeRequest) (*readyState, error) {
+			called.Store(true)
+			return &readyState{
+				response: &pb.InitializeResponse{PublicKey: []byte("test-public-key")},
+			}, nil
+		},
+	)
 	req := s.validInitReq()
 	req.KmsLocalstackEnabled = true
 
@@ -270,16 +295,9 @@ func (s *EnclaveServiceTestSuite) TestInitialize_Idempotent() {
 	s.Equal(int32(1), calls.Load(), "runInit must run exactly once across repeated Initialize calls")
 }
 
-// TestInitialize_Concurrent verifies many simultaneous Initialize calls
-// collapse onto a single runInit and all callers observe success. This
-// exercises both layers of the gate's exactly-once guarantee: the
-// singleflight collapse for callers that pile up while the leader is
-// still running, and the inner g.done.Load() re-check for callers that
-// arrive *after* a prior singleflight batch has completed and its key
-// has been deleted from the singleflight map. Without the inner check,
-// such late callers would enter a fresh sf.Do entry and re-invoke
-// runInit; the assertion `runInit must run exactly once` would fail
-// under unfavourable scheduling.
+// TestInitialize_Concurrent verifies that concurrent calls use one runInit
+// operation. It also verifies that a late call uses the Ready state after
+// singleflight removes the completed operation.
 func (s *EnclaveServiceTestSuite) TestInitialize_Concurrent() {
 	const goroutines = 50
 
@@ -395,19 +413,19 @@ func (s *EnclaveServiceTestSuite) TestInitialize_RejectsUnsupportedRegionsAfterI
 	}
 }
 
-// TestInitialize_LeaderContextDetached verifies that caller cancellation does
-// not cancel the shared initialization operation. The gate timeout continues
-// to bound the operation.
+// TestInitialize_LeaderContextDetached verifies that runInit continues after
+// the leader cancels. The canceled RPC returns promptly.
+// The operation can still set the Ready state for a later same-source retry.
 func (s *EnclaveServiceTestSuite) TestInitialize_LeaderContextDetached() {
 	runInitStarted := make(chan struct{})
+	runInitFinished := make(chan struct{})
 	allowReturn := make(chan struct{})
-	runInitReturned := make(chan struct{})
 	var runInitCtxErr atomic.Value // error observed by runInit at return
 	svc := s.newUninitializedService(func(ctx context.Context, _ *pb.InitializeRequest) error {
 		close(runInitStarted)
 		<-allowReturn
 		runInitCtxErr.Store(errOrNil(ctx.Err()))
-		close(runInitReturned)
+		close(runInitFinished)
 		return nil
 	})
 
@@ -424,22 +442,22 @@ func (s *EnclaveServiceTestSuite) TestInitialize_LeaderContextDetached() {
 	<-runInitStarted   // wait until runInit is inside the closure
 	cancelLeader()     // simulate leader's client disconnecting
 	close(allowReturn) // let runInit finish
-	<-runInitReturned
 
 	wg.Wait()
+	<-runInitFinished
 
 	// runInit must have observed a non-cancelled ctx at the point of return,
 	// proving the detach worked.
 	s.Equal(errNil{}, runInitCtxErr.Load(),
 		"runInit must see a non-cancelled context even after leader cancel")
 
-	s.Equal(codes.Canceled, status.Code(leaderErr),
-		"caller cancellation must stop only that caller's wait")
-	_, retryErr := svc.Initialize(context.Background(), s.validInitReq())
-	s.Require().NoError(retryErr,
-		"the shared initialization must still complete for a later caller")
+	s.Equal(codes.Canceled, status.Code(leaderErr))
+
+	resp, err := svc.Initialize(context.Background(), s.validInitReq())
+	s.Require().NoError(err)
+	s.NotNil(resp)
 	s.True(svc.gate.initialized(),
-		"gate must latch when runInit returns nil even if leader was cancelled")
+		"detached runInit must publish Ready even if the original caller was cancelled")
 }
 
 func (s *EnclaveServiceTestSuite) TestInitialize_LeaderDeadlineDoesNotCancelSharedOperation() {
@@ -525,6 +543,21 @@ func TestRunInitStatusError_KmsBranch(t *testing.T) {
 	st, ok := status.FromError(got)
 	require.True(t, ok)
 	require.Equal(t, codes.PermissionDenied, st.Code())
+}
+
+func TestRunInitStatusError_PreservesExpiredTokenOverLaterDeadline(t *testing.T) {
+	authErr := &smithy.GenericAPIError{Code: "ExpiredTokenException", Message: "security token expired"}
+	// call() replaces a later DeadlineExceeded with the auth error, then wraps
+	// only that value. toStatusError checks DeadlineExceeded first, so a join
+	// would hide Unauthenticated.
+	callErr := fmt.Errorf("all multi-region keys are invalid, error: %w", authErr)
+	initErr := fmt.Errorf("kms generate data key: %w", callErr)
+	require.False(t, errors.Is(initErr, context.DeadlineExceeded))
+
+	got := runInitStatusError(initErr)
+	st, ok := status.FromError(got)
+	require.True(t, ok)
+	require.Equal(t, codes.Unauthenticated, st.Code())
 }
 
 func TestEnclaveServiceTestSuite(t *testing.T) {

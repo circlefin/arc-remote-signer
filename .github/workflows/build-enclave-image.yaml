@@ -9,7 +9,7 @@ on:
     inputs:
       runner:
         type: string
-        default: ubuntu-latest
+        default: xlarge-dind
       docker_archive_artifact_name:
         description: Artifact name for an optional signer-with-enclave docker archive upload
         type: string
@@ -39,8 +39,16 @@ jobs:
     outputs:
       docker_archive_artifact_name: ${{ steps.archive_meta.outputs.name }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # Sets GOPROXY and exports the Cloudsmith credentials consumed by Bake.
+      # Keep this before artifact download: checkout cleans the workspace.
+      - name: Set up Go and Cloudsmith credentials
+        uses: crcl-main/circle-runner-setup-action@v5
+        with:
+          repository: ${{ github.repository }}
+          branch: ${{ github.ref }}
+          go_enabled: true
+          go_version: "1.26.10"
+          go_cloudsmith_enabled: true
 
       - name: Download EIF artifact
         uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4

@@ -9,7 +9,10 @@ public:
       cert: ""
       key: ""
       # clientAuth upgrades server-authenticated TLS to mutual TLS. Use a
-      # dedicated CA that issues certificates only to authorized clients.
+      # dedicated CA that issues certificates only to authorized clients. A
+      # v2 signing request must include a stable caller-provided
+      # replica_name. The signer logs a warning when the certificate has no
+      # usable URI SAN, more than one URI SAN, or a different URI SAN.
       clientAuth:
         enabled: false
         ca: ""

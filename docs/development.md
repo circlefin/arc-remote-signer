@@ -7,7 +7,7 @@ For test conventions and coverage expectations, see [testing.md](testing.md).
 
 ## Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - Docker and Docker Compose
 - Make
 - `pre-commit` (install via `brew install pre-commit`, then `pre-commit install`)
@@ -26,6 +26,13 @@ The development settings use separate provider switches:
 
 - `APP_PROVIDER_SECRETS_LOCALSTACK_ENABLED` selects LocalStack for Secrets Manager.
 - `APP_PROVIDER_AWSKMS_LOCALSTACK_ENABLED` selects LocalStack for KMS.
+
+The LocalStack watermark table name is `watermarks`. The repository uses the
+host AWS configuration. In local development,
+`APP_PROVIDER_SECRETS_LOCALSTACK_REGION` sets the region. Its default value is
+`us-east-1`. The LocalStack initialization scripts create the table. The host
+constructs the durable repository during startup. The version 2 signer uses the
+durable repository for each request that requires watermark enforcement.
 
 The signer-dev image can use standard AWS KMS while `APP_ENV=dev`. Set
 `APP_PROVIDER_AWSKMS_LOCALSTACK_ENABLED=false` and provide
@@ -53,9 +60,9 @@ See [testing.md](testing.md) for the full test matrix and conventions. Top-level
 
 ## Conventions
 
-- **Go version**: 1.25
+- **Go version**: 1.26
 - **Copyright header**: All `.go` files except generated `*_mock.go` files must carry the Circle Internet Group Apache 2.0 license header. The exception matches the `check-copyright-golang` pre-commit hook.
-- **Commit messages**: `type(ticket|NOSTORY): description`, following [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) for the `type` semantics. Valid tickets follow the project's Jira prefix.
+- **Commit messages**: Use `type(scope): description`. Use the `type` values from [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
 - **Mocking**: `github.com/golang/mock` (v1.6.0). Mocks are `*_mock.go` files co-located with the interfaces they mock; regenerate with `mockgen`.
 - **Config**: Viper-based, env var prefix `APP_`. See [architecture.md#common-production-settings](architecture.md#common-production-settings).
 - **Logging**: Use the repo-local logger in `internal/common/logging/`.
@@ -92,8 +99,9 @@ job, which has no equivalent local `make` target. See
 ├── internal/
 │   ├── app/                # Host application (app run)
 │   │   ├── public/         # gRPC handlers
-│   │   ├── service/        # Business logic (signer)
+│   │   ├── service/        # Business logic for each signer API version
 │   │   ├── provider/       # Secrets Manager + enclave client (no KMS on the host)
+│   │   ├── repository/     # Atomic persistence for host-side domain state
 │   │   └── metrics/        # API metrics
 │   ├── enclave/            # Enclave-side (inside Nitro Enclave)
 │   │   ├── public/         # Enclave gRPC handlers
@@ -101,7 +109,7 @@ job, which has no equivalent local `make` target. See
 │   │   ├── provider/       # awskms (KMS client), awsproxy, enclave (NSM)
 │   │   └── common/crypto/  # In-enclave AES, BLS, Ed25519 primitives
 │   ├── vsockproxy/         # Host-side vsock↔AWS KMS bridge (app run-vsockproxy)
-│   ├── common/             # Shared infrastructure
+│   ├── common/             # Shared infrastructure and watermark domain model
 │   │   ├── byteproxy/      # vsock byte proxy + AWS route framing
 │   │   ├── config/         # Viper config loader
 │   │   ├── crypto/         # AES, random generation
@@ -112,7 +120,8 @@ job, which has no equivalent local `make` target. See
 │   │   └── telemetry/      # OpenTelemetry
 │   └── smoke/              # End-to-end smoke tests
 ├── proto/                  # Protocol buffers
-│   ├── arc/signer/v1/      # SignerService (external API)
+│   ├── arc/signer/v1/      # SignerService version 1 (external API)
+│   ├── arc/signer/v2/      # SignerService version 2 with watermark enforcement
 │   └── arc/enclave/v1/     # EnclaveService (internal API)
 ├── docker/                 # Docker build configuration
 ├── deploy/                 # Terraform deployment configs

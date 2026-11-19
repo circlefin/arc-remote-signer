@@ -1,5 +1,7 @@
 // This is set automatically when running in Github Actions
 variable "CI" { default = "false" }
+variable "CLOUDSMITH_USER" { default = "" }
+variable "GOPROXY" { default = "https://proxy.golang.org,direct" }
 variable "ENCLAVE_EIF" { default = "" }
 
 // Reproducible enclave build variables.
@@ -31,11 +33,15 @@ target "meta-target" {
   }
 
   args = {
-    ENCLAVE_EIF  = ENCLAVE_EIF
-    ENCLAVE_PCR0 = ENCLAVE_PCR0
-    ENCLAVE_PCR1 = ENCLAVE_PCR1
-    ENCLAVE_PCR2 = ENCLAVE_PCR2
+    GOPROXY         = GOPROXY
+    CLOUDSMITH_USER = CLOUDSMITH_USER
+    ENCLAVE_EIF     = ENCLAVE_EIF
+    ENCLAVE_PCR0    = ENCLAVE_PCR0
+    ENCLAVE_PCR1    = ENCLAVE_PCR1
+    ENCLAVE_PCR2    = ENCLAVE_PCR2
   }
+
+  secret = ["type=env,id=cloudsmith_token,env=CLOUDSMITH_TOKEN"]
 
   tags   = ["nitro-enclave-signer/${item}:latest"]
   output = CI ? [] : ["type=docker"]
@@ -61,6 +67,13 @@ target "signer-dev-meta-target" {
     certs = "./docker/certs"
   }
 
+  args = {
+    GOPROXY         = GOPROXY
+    CLOUDSMITH_USER = CLOUDSMITH_USER
+  }
+
+  secret = ["type=env,id=cloudsmith_token,env=CLOUDSMITH_TOKEN"]
+
   tags   = ["nitro-enclave-signer/signer-dev:latest"]
   output = CI ? [] : ["type=docker"]
 }
@@ -80,8 +93,12 @@ target "enclave-meta-target" {
   }
 
   args = {
+    GOPROXY           = GOPROXY
+    CLOUDSMITH_USER   = CLOUDSMITH_USER
     SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH
   }
+
+  secret = ["type=env,id=cloudsmith_token,env=CLOUDSMITH_TOKEN"]
 
   tags   = ["nitro-enclave-signer/enclave:latest"]
   // rewrite-timestamp requires BuildKit >= 0.13.0

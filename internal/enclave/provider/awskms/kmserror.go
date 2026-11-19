@@ -23,11 +23,11 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// StatusFromError translates AWS KMS SDK errors to gRPC status codes
-// per the CCHAIN-2027 design. Returns nil if err is nil. Returns the
-// original err unchanged when the error is not recognised, so the
-// caller can apply its own fallback (e.g. wrap as Internal). The name
-// mirrors grpc/status.FromError, this being a KMS-aware variant.
+// StatusFromError converts AWS KMS SDK errors to gRPC status codes.
+// It returns nil when err is nil.
+// If it does not recognize the error, it returns the same error.
+// The caller can then apply a fallback, such as an Internal status.
+// The function name follows grpc/status.FromError.
 func StatusFromError(err error) error {
 	if err == nil {
 		return nil

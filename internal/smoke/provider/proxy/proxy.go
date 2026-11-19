@@ -21,6 +21,7 @@ import (
 	"time"
 
 	pb "github.com/circlefin/arc-remote-signer/proto/pb"
+	"github.com/circlefin/arc-remote-signer/proto/pb/signerv2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -29,8 +30,9 @@ const defaultSvcAddr = "localhost:10340"
 
 // Provider wraps the gRPC client for smoke testing.
 type Provider struct {
-	client pb.SignerServiceClient
-	conn   *grpc.ClientConn
+	clientV1 pb.SignerServiceClient
+	clientV2 signerv2.SignerServiceClient
+	conn     *grpc.ClientConn
 }
 
 // New creates a new proxy provider.
@@ -72,8 +74,8 @@ func (c *Provider) connect() error {
 		}
 
 		c.conn = conn
-		client := pb.NewSignerServiceClient(conn)
-		c.client = client
+		c.clientV1 = pb.NewSignerServiceClient(conn)
+		c.clientV2 = signerv2.NewSignerServiceClient(conn)
 		return nil
 	}
 	return fmt.Errorf("failed to connect after %d attempts: %w", maxRetries, lastErr)
@@ -81,16 +83,33 @@ func (c *Provider) connect() error {
 
 // PublicKey returns the public key of the signer service.
 func (c *Provider) PublicKey(ctx context.Context) (*pb.PublicKeyResponse, error) {
-	resp, err := c.client.PublicKey(ctx, &pb.PublicKeyRequest{})
+	resp, err := c.clientV1.PublicKey(ctx, &pb.PublicKeyRequest{})
 	if err != nil {
 		return nil, err
 	}
 	return resp, nil
 }
 
+// PublicKeyV2 returns the public key through the version 2 service.
+func (c *Provider) PublicKeyV2(ctx context.Context) (*signerv2.PublicKeyResponse, error) {
+	return c.clientV2.PublicKey(ctx, &signerv2.PublicKeyRequest{})
+}
+
 // Sign signs a message with the signer service.
 func (c *Provider) Sign(ctx context.Context, req *pb.SignRequest) (*pb.SignResponse, error) {
-	resp, err := c.client.Sign(ctx, req)
+	resp, err := c.clientV1.Sign(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// SignV2 signs a version 2 request with the signer service.
+func (c *Provider) SignV2(
+	ctx context.Context,
+	req *signerv2.SignRequest,
+) (*signerv2.SignResponse, error) {
+	resp, err := c.clientV2.Sign(ctx, req)
 	if err != nil {
 		return nil, err
 	}
