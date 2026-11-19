@@ -4,6 +4,7 @@ package arc.enclave.v1;
 
 option go_package = "github.com/circlefin/arc-remote-signer/proto/pb";
 
+import "arc/signer/v2/signer.proto";
 import "buf/validate/validate.proto";
 
 service EnclaveService {
@@ -35,8 +36,9 @@ message InitializeRequest {
   // kms_localstack_enabled selects LocalStack instead of AWS KMS. Nitro
   // Enclave deployments must keep this value false.
   bool kms_localstack_enabled = 3;
-  // key_source specifies whether Initialize recovers a stored key or
-  // generates a new key and returns its envelope for host persistence.
+  // key_source specifies how Initialize obtains the validator key.
+  // existing_key recovers a stored key in the enclave. generate_new makes a
+  // key. generate_new returns the envelope for the host to store.
   oneof key_source {
     option (buf.validate.oneof).required = true;
 
@@ -50,8 +52,12 @@ message InitializeRequest {
 
 message InitializeResponse {
   bytes public_key = 1 [(buf.validate.field).bytes.min_len = 1];
+  // attestation_document binds public_key to the Nitro enclave. It is empty
+  // when Nitro mode is disabled.
   bytes attestation_document = 2;
-  // secret_envelope is present only when generate_new was requested.
+  // secret_envelope is set only for generate_new. The host stores these
+  // envelope fields in a header. After a restart, the host reconstructs the
+  // envelope and supplies it as existing_key.
   SecretEnvelope secret_envelope = 3;
 }
 
@@ -113,6 +119,9 @@ message SignMessageRequest {
   reserved 1, 2, 4;
   reserved "algorithm", "encrypted_key_material", "secret_envelope";
   bytes message = 3 [(buf.validate.field).bytes.min_len = 1];
+  // metadata is supplied by the node and forwarded unchanged by the host for
+  // watermark enforcement. It is absent on legacy v1 signing requests.
+  arc.signer.v2.SigningMetadata metadata = 5;
 }
 
 message SignMessageResponse {

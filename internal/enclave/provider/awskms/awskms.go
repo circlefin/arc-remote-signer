@@ -63,8 +63,13 @@ type Provider interface {
 	GenerateDataKey(ctx context.Context) (plainDataKey []byte, cipherDataKey []byte, ciphertextForRecipient []byte, err error)
 }
 
+type kmsAPI interface {
+	Decrypt(context.Context, *kms.DecryptInput, ...func(*kms.Options)) (*kms.DecryptOutput, error)
+	GenerateDataKey(context.Context, *kms.GenerateDataKeyInput, ...func(*kms.Options)) (*kms.GenerateDataKeyOutput, error)
+}
+
 type client struct {
-	*kms.Client
+	api kmsAPI
 	arn string
 }
 
@@ -172,7 +177,7 @@ func (p *provider) Decrypt(ctx context.Context, ciphertext []byte) (plaintext []
 			CiphertextBlob: ciphertext,
 			Recipient:      p.recipient,
 		}
-		res, err = client.Decrypt(ctx, input)
+		res, err = client.api.Decrypt(ctx, input)
 		if err != nil {
 			getLogger().WarnErr(ctx, "p.client.Decrypt failed", err, logging.Entries{"arn": client.arn})
 			return err
@@ -195,7 +200,7 @@ func (p *provider) GenerateDataKey(ctx context.Context) (plainDataKey, cipherDat
 			KeySpec:   types.DataKeySpecAes256,
 			Recipient: p.recipient,
 		}
-		res, err = client.GenerateDataKey(ctx, input)
+		res, err = client.api.GenerateDataKey(ctx, input)
 		if err != nil {
 			getLogger().WarnErr(ctx, "p.client.GenerateDataKey failed", err, logging.Entries{"arn": client.arn})
 			return err
@@ -259,14 +264,16 @@ func initClients(
 			if err != nil {
 				return nil, fmt.Errorf("build awsproxy HTTP client for arn_%d: %w", i+1, err)
 			}
+			// Initialization uses the provider once. Do not retain idle proxy
+			// connections after the attempt ends.
 			httpClient = httpClient.WithTransportOptions(func(tr *http.Transport) {
 				tr.DisableKeepAlives = true
 			})
 			c.HTTPClient = httpClient
 		}
 		clients = append(clients, &client{
-			Client: kms.NewFromConfig(c, opts...),
-			arn:    arn,
+			api: kms.NewFromConfig(c, opts...),
+			arn: arn,
 		})
 	}
 	return clients, nil
@@ -320,7 +327,7 @@ func extractRegionFromKmsKeyArn(arnStr string) (string, error) {
 }
 
 func validateKMSRegion(region string) error {
-	// This list is the AWS commercial partition subset of KMS endpoints at
+	// This is the AWS commercial partition subset of the KMS endpoints listed at
 	// https://docs.aws.amazon.com/general/latest/gr/kms.html. Keep this switch and
 	// TestValidateKMSRegion_AcceptsCommercialKMSRegions synchronized when AWS adds
 	// a KMS region. GovCloud, China, and isolated partitions are not supported.

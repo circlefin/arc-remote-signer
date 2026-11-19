@@ -2,9 +2,11 @@
 # are not recognized by the dependency review action's exact-match allowlist.
 # All combinations below are permissive-only.
 pkg:golang/github.com/puzpuzpuz/xsync/v3
+pkg:golang/github.com/stretchr/testify
 pkg:golang/go.opentelemetry.io/otel
 pkg:golang/go.opentelemetry.io/otel/exporters/otlp/otlptrace
 pkg:golang/go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc
+pkg:golang/go.opentelemetry.io/otel/log
 pkg:golang/go.opentelemetry.io/otel/metric
 pkg:golang/go.opentelemetry.io/otel/sdk
 pkg:golang/go.opentelemetry.io/otel/trace

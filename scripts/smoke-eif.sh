@@ -15,7 +15,7 @@
 #   APP_PROVIDER_AWSKMS_ARNS    Comma-separated AWS KMS key ARNs (required)
 #   ENCLAVE_CPU                 CPU count for the enclave (default: 2)
 #   ENCLAVE_MEMORY              Memory in MiB for the enclave (default: 4096)
-set -eu
+set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 export PROJECT_DIR
@@ -124,16 +124,12 @@ verify_image_contents() {
         '
 }
 
-cleanup() {
-    local status=$?
+stop_signer() {
     local cleanup_failed=0
     local inspect_output
     local container_exists=false
     local container_absent=false
     local container_exit_code
-
-    trap - EXIT INT TERM
-    set +e
 
     if inspect_output="$(run_bounded 10 docker inspect "$CONTAINER_NAME" 2>&1)"; then
         container_exists=true
@@ -175,7 +171,14 @@ cleanup() {
         cleanup_failed=1
     fi
 
-    if [ "$status" -eq 0 ] && [ "$cleanup_failed" -ne 0 ]; then
+    return "$cleanup_failed"
+}
+
+cleanup() {
+    local status=$?
+    trap - EXIT INT TERM
+    set +e
+    if ! stop_signer && [ "$status" -eq 0 ]; then
         status=1
     fi
     exit "$status"
@@ -227,8 +230,9 @@ if ! terminate_enclaves; then
     exit 1
 fi
 
-# Debug mode permits per-PR EIFs but does not validate PCR-based identity policy.
-docker run -d \
+start_signer() {
+    # Debug mode permits per-PR EIFs but does not validate PCR-based identity policy.
+    docker run -d \
     --name "$CONTAINER_NAME" \
     --network host \
     --device=/dev/nitro_enclaves \
@@ -259,9 +263,23 @@ nitro-cli() {
     /usr/bin/nitro-cli "$@"
 }
 source /usr/local/circle/run.sh
-'
+' || return 1
 
 # Wait for the host app gRPC health endpoint exposed by the image on port 10340
-wait_for "Host app" 60 grpc_health_probe -addr=127.0.0.1:10340
+    wait_for "Host app" 60 grpc_health_probe -addr=127.0.0.1:10340
+}
 
-go test -tags=smoke,nitro_smoke -count=1 -timeout=5m "${PROJECT_DIR}/internal/smoke/..."
+run_smoke_phases() {
+    start_signer || return 1
+    go test -tags=smoke,nitro_smoke -count=1 -timeout=5m "$PROJECT_DIR/internal/smoke/..." || return 1
+    stop_signer || return 1
+    start_signer || return 1
+    SMOKE_VERIFY_RESTART=true go test \
+        -tags=smoke,nitro_smoke \
+        -run '^TestPublicV2$' \
+        -count=1 \
+        -timeout=5m \
+        "$PROJECT_DIR/internal/smoke/public"
+}
+
+run_smoke_phases

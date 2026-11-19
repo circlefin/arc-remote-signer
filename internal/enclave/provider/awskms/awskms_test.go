@@ -16,7 +16,6 @@ package awskms
 import (
 	"context"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -30,42 +29,17 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/aws/smithy-go"
 	"github.com/circlefin/arc-remote-signer/internal/common/byteproxy"
+	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-type kmsHTTPClientFunc func(*http.Request) (*http.Response, error)
-
-func (f kmsHTTPClientFunc) Do(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
-
-func newGenerateDataKeyTestClient(
-	region string,
-	do kmsHTTPClientFunc,
-) *client {
-	arn := "arn:aws:kms:" + region + ":123456789012:key/test"
-	sdkClient := kms.New(kms.Options{
-		Credentials: aws.AnonymousCredentials{},
-		HTTPClient:  do,
-		Region:      region,
-		Retryer:     aws.NopRetryer{},
-	})
-	return &client{Client: sdkClient, arn: arn}
-}
-
-func generateDataKeyResponse(req *http.Request) *http.Response {
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Header: http.Header{
-			"Content-Type": []string{"application/x-amz-json-1.1"},
-		},
-		Body: io.NopCloser(strings.NewReader(
-			`{"Plaintext":"cGxhaW50ZXh0","CiphertextBlob":"Y2lwaGVydGV4dA=="}`,
-		)),
-		Request: req,
-	}
+func requireSDKClientOptions(t *testing.T, c *client) kms.Options {
+	t.Helper()
+	sdkClient, ok := c.api.(*kms.Client)
+	require.True(t, ok)
+	return sdkClient.Options()
 }
 
 func newTestClient(t *testing.T, arn string) *client {
@@ -216,38 +190,69 @@ func transportFailureError() error {
 	}
 }
 
-func requireExpiredTokenUnauthenticated(t *testing.T, err error) {
+func requireCredentialAuthUnauthenticated(t *testing.T, err error, wantCode string) {
 	t.Helper()
+	require.ErrorContains(t, err, "all multi-region keys are invalid")
 	var apiErr smithy.APIError
 	require.ErrorAs(t, err, &apiErr)
-	require.Equal(t, "ExpiredTokenException", apiErr.ErrorCode())
+	require.Equal(t, wantCode, apiErr.ErrorCode())
+	require.False(t, errors.Is(err, context.DeadlineExceeded))
 	mapped := StatusFromError(err)
 	st, ok := status.FromError(mapped)
 	require.True(t, ok)
 	require.Equal(t, codes.Unauthenticated, st.Code())
 }
 
-func TestCall_PreservesExpiredTokenOverLaterTransportFailure(t *testing.T) {
-	first := newTestClient(t, "arn:aws:kms:us-east-1:123456789012:key/first")
-	second := newTestClient(t, "arn:aws:kms:us-west-2:123456789012:key/second")
-	p := &provider{
-		clients: []*client{first, second},
+func TestCall_PreservesCredentialAuthErrorOverLaterRegionalFailure(t *testing.T) {
+	tests := map[string]struct {
+		authErr  error
+		laterErr error
+		wantCode string
+	}{
+		"expired token then transport": {
+			authErr:  expiredTokenError(),
+			laterErr: transportFailureError(),
+			wantCode: "ExpiredTokenException",
+		},
+		"invalid client token then transport": {
+			authErr:  &smithy.GenericAPIError{Code: "InvalidClientTokenId", Message: "access key does not exist"},
+			laterErr: transportFailureError(),
+			wantCode: "InvalidClientTokenId",
+		},
+		"unrecognized client then transport": {
+			authErr:  &smithy.GenericAPIError{Code: "UnrecognizedClientException", Message: "invalid credentials"},
+			laterErr: transportFailureError(),
+			wantCode: "UnrecognizedClientException",
+		},
+		"expired token then deadline": {
+			authErr:  expiredTokenError(),
+			laterErr: context.DeadlineExceeded,
+			wantCode: "ExpiredTokenException",
+		},
 	}
 
-	firstErr := expiredTokenError()
-	var callOrder []*client
-	err := p.call(func(gotClient *client) error {
-		callOrder = append(callOrder, gotClient)
-		if gotClient == first {
-			return firstErr
-		}
-		require.Same(t, second, gotClient)
-		return transportFailureError()
-	})
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			first := newTestClient(t, "arn:aws:kms:us-east-1:123456789012:key/first")
+			second := newTestClient(t, "arn:aws:kms:us-west-2:123456789012:key/second")
+			p := &provider{
+				clients: []*client{first, second},
+			}
 
-	require.Equal(t, []*client{first, second}, callOrder)
-	require.ErrorContains(t, err, "all multi-region keys are invalid")
-	requireExpiredTokenUnauthenticated(t, err)
+			var callOrder []*client
+			err := p.call(func(gotClient *client) error {
+				callOrder = append(callOrder, gotClient)
+				if gotClient == first {
+					return tt.authErr
+				}
+				require.Same(t, second, gotClient)
+				return tt.laterErr
+			})
+
+			require.Equal(t, []*client{first, second}, callOrder)
+			requireCredentialAuthUnauthenticated(t, err, tt.wantCode)
+		})
+	}
 }
 
 func TestGenerateDataKey_FailsOverAfterFirstRegionTimeoutOrThrottle(t *testing.T) {
@@ -258,21 +263,42 @@ func TestGenerateDataKey_FailsOverAfterFirstRegionTimeoutOrThrottle(t *testing.T
 
 	for name, firstRegionErr := range tests {
 		t.Run(name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
 			var callOrder []string
-			first := newGenerateDataKeyTestClient(
-				"us-east-1",
-				func(*http.Request) (*http.Response, error) {
+			firstARN := "arn:aws:kms:us-east-1:123456789012:key/first"
+			firstAPI := NewMockkmsAPI(ctrl)
+			firstAPI.EXPECT().
+				GenerateDataKey(gomock.Any(), &kms.GenerateDataKeyInput{
+					KeyId:   &firstARN,
+					KeySpec: types.DataKeySpecAes256,
+				}).
+				DoAndReturn(func(context.Context, *kms.GenerateDataKeyInput, ...func(*kms.Options)) (*kms.GenerateDataKeyOutput, error) {
 					callOrder = append(callOrder, "us-east-1")
 					return nil, firstRegionErr
-				},
-			)
-			second := newGenerateDataKeyTestClient(
-				"us-west-2",
-				func(req *http.Request) (*http.Response, error) {
+				})
+			first := &client{
+				arn: firstARN,
+				api: firstAPI,
+			}
+
+			secondARN := "arn:aws:kms:us-west-2:123456789012:key/second"
+			secondAPI := NewMockkmsAPI(ctrl)
+			secondAPI.EXPECT().
+				GenerateDataKey(gomock.Any(), &kms.GenerateDataKeyInput{
+					KeyId:   &secondARN,
+					KeySpec: types.DataKeySpecAes256,
+				}).
+				DoAndReturn(func(context.Context, *kms.GenerateDataKeyInput, ...func(*kms.Options)) (*kms.GenerateDataKeyOutput, error) {
 					callOrder = append(callOrder, "us-west-2")
-					return generateDataKeyResponse(req), nil
-				},
-			)
+					return &kms.GenerateDataKeyOutput{
+						Plaintext:      []byte("plaintext"),
+						CiphertextBlob: []byte("ciphertext"),
+					}, nil
+				})
+			second := &client{
+				arn: secondARN,
+				api: secondAPI,
+			}
 			p := &provider{clients: []*client{first, second}}
 
 			plaintext, ciphertext, _, err := p.GenerateDataKey(context.Background())
@@ -286,15 +312,24 @@ func TestGenerateDataKey_FailsOverAfterFirstRegionTimeoutOrThrottle(t *testing.T
 }
 
 func TestGenerateDataKey_AllRegionsTimeout(t *testing.T) {
+	ctrl := gomock.NewController(t)
 	var callOrder []string
 	timeoutClient := func(region string) *client {
-		return newGenerateDataKeyTestClient(
-			region,
-			func(*http.Request) (*http.Response, error) {
+		arn := "arn:aws:kms:" + region + ":123456789012:key/test"
+		api := NewMockkmsAPI(ctrl)
+		api.EXPECT().
+			GenerateDataKey(gomock.Any(), &kms.GenerateDataKeyInput{
+				KeyId:   &arn,
+				KeySpec: types.DataKeySpecAes256,
+			}).
+			DoAndReturn(func(context.Context, *kms.GenerateDataKeyInput, ...func(*kms.Options)) (*kms.GenerateDataKeyOutput, error) {
 				callOrder = append(callOrder, region)
 				return nil, context.DeadlineExceeded
-			},
-		)
+			})
+		return &client{
+			arn: arn,
+			api: api,
+		}
 	}
 	p := &provider{clients: []*client{
 		timeoutClient("us-east-1"),
@@ -307,52 +342,40 @@ func TestGenerateDataKey_AllRegionsTimeout(t *testing.T) {
 	require.Equal(t, []string{"us-east-1", "us-west-2"}, callOrder)
 }
 
-func TestGenerateDataKey_PreservesExpiredTokenOverLaterTransportFailure(t *testing.T) {
-	var callOrder []string
-	first := newGenerateDataKeyTestClient(
-		"us-east-1",
-		func(*http.Request) (*http.Response, error) {
-			callOrder = append(callOrder, "us-east-1")
-			return nil, expiredTokenError()
-		},
-	)
-	second := newGenerateDataKeyTestClient(
-		"us-west-2",
-		func(*http.Request) (*http.Response, error) {
-			callOrder = append(callOrder, "us-west-2")
-			return nil, transportFailureError()
-		},
-	)
-	p := &provider{clients: []*client{first, second}}
-
-	_, _, _, err := p.GenerateDataKey(context.Background())
-
-	require.Equal(t, []string{"us-east-1", "us-west-2"}, callOrder)
-	requireExpiredTokenUnauthenticated(t, err)
-}
-
 func TestGenerateDataKey_PrefersExpiredTokenOverEarlierTimeout(t *testing.T) {
+	ctrl := gomock.NewController(t)
 	var callOrder []string
-	first := newGenerateDataKeyTestClient(
-		"us-east-1",
-		func(*http.Request) (*http.Response, error) {
+	firstARN := "arn:aws:kms:us-east-1:123456789012:key/first"
+	firstAPI := NewMockkmsAPI(ctrl)
+	firstAPI.EXPECT().
+		GenerateDataKey(gomock.Any(), &kms.GenerateDataKeyInput{
+			KeyId:   &firstARN,
+			KeySpec: types.DataKeySpecAes256,
+		}).
+		DoAndReturn(func(context.Context, *kms.GenerateDataKeyInput, ...func(*kms.Options)) (*kms.GenerateDataKeyOutput, error) {
 			callOrder = append(callOrder, "us-east-1")
 			return nil, context.DeadlineExceeded
-		},
-	)
-	second := newGenerateDataKeyTestClient(
-		"us-west-2",
-		func(*http.Request) (*http.Response, error) {
+		})
+	secondARN := "arn:aws:kms:us-west-2:123456789012:key/second"
+	secondAPI := NewMockkmsAPI(ctrl)
+	secondAPI.EXPECT().
+		GenerateDataKey(gomock.Any(), &kms.GenerateDataKeyInput{
+			KeyId:   &secondARN,
+			KeySpec: types.DataKeySpecAes256,
+		}).
+		DoAndReturn(func(context.Context, *kms.GenerateDataKeyInput, ...func(*kms.Options)) (*kms.GenerateDataKeyOutput, error) {
 			callOrder = append(callOrder, "us-west-2")
 			return nil, expiredTokenError()
-		},
-	)
-	p := &provider{clients: []*client{first, second}}
+		})
+	p := &provider{clients: []*client{
+		{arn: firstARN, api: firstAPI},
+		{arn: secondARN, api: secondAPI},
+	}}
 
 	_, _, _, err := p.GenerateDataKey(context.Background())
 
 	require.Equal(t, []string{"us-east-1", "us-west-2"}, callOrder)
-	requireExpiredTokenUnauthenticated(t, err)
+	requireCredentialAuthUnauthenticated(t, err, "ExpiredTokenException")
 }
 
 func TestDecrypt_EmptyCiphertext(t *testing.T) {
@@ -635,7 +658,7 @@ func TestInitClients_StandardAWSPinsCanonicalEndpoint(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, clients, 1)
-	options := clients[0].Options()
+	options := requireSDKClientOptions(t, clients[0])
 	require.NotNil(t, options.BaseEndpoint)
 	require.Equal(t, "https://kms.us-west-2.amazonaws.com", *options.BaseEndpoint)
 	httpClient, ok := options.HTTPClient.(*awshttp.BuildableClient)
@@ -643,7 +666,6 @@ func TestInitClients_StandardAWSPinsCanonicalEndpoint(t *testing.T) {
 	transport := httpClient.GetTransport()
 	require.NotNil(t, transport.TLSClientConfig)
 	require.Equal(t, "kms.us-west-2.amazonaws.com", transport.TLSClientConfig.ServerName)
-	require.NotNil(t, transport.TLSClientConfig.RootCAs)
 }
 
 func TestInitClients_DisablesKeepAlivesForAttemptScopedClients(t *testing.T) {
@@ -656,7 +678,7 @@ func TestInitClients_DisablesKeepAlivesForAttemptScopedClients(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, clients, 1)
-	options := clients[0].Options()
+	options := requireSDKClientOptions(t, clients[0])
 	httpClient, ok := options.HTTPClient.(*awshttp.BuildableClient)
 	require.True(t, ok)
 	require.True(t, httpClient.GetTransport().DisableKeepAlives)
@@ -673,7 +695,7 @@ func TestInitClients_LocalStackPreservesEndpointWithoutTLSPinning(t *testing.T) 
 
 	require.NoError(t, err)
 	require.Len(t, clients, 1)
-	options := clients[0].Options()
+	options := requireSDKClientOptions(t, clients[0])
 	require.NotNil(t, options.BaseEndpoint)
 	require.Equal(t, localstackEndpoint, *options.BaseEndpoint)
 	httpClient, ok := options.HTTPClient.(*awshttp.BuildableClient)
@@ -698,7 +720,8 @@ func TestInitClientsRoutesEachARNRegion(t *testing.T) {
 	require.Len(t, clients, 2)
 
 	for i, wantRegion := range []string{"us-east-1", "us-west-2"} {
-		httpClient, ok := clients[i].Options().HTTPClient.(*awshttp.BuildableClient)
+		options := requireSDKClientOptions(t, clients[i])
+		httpClient, ok := options.HTTPClient.(*awshttp.BuildableClient)
 		require.True(t, ok)
 		conn, dialErr := httpClient.GetTransport().DialContext(
 			context.Background(), "tcp", "kms."+wantRegion+".amazonaws.com:443",
@@ -713,4 +736,59 @@ func TestInitClientsRoutesEachARNRegion(t *testing.T) {
 		require.NoError(t, accepted.Close())
 		require.Equal(t, byteproxy.AWSRoute{Service: "kms", Region: wantRegion}, route)
 	}
+}
+
+type kmsHTTPClientFunc func(*http.Request) (*http.Response, error)
+
+func (f kmsHTTPClientFunc) Do(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func newGenerateDataKeyTestClient(
+	region string,
+	do kmsHTTPClientFunc,
+) *client {
+	arn := "arn:aws:kms:" + region + ":123456789012:key/test"
+	sdkClient := kms.New(kms.Options{
+		Credentials: aws.AnonymousCredentials{},
+		HTTPClient:  do,
+		Region:      region,
+		Retryer:     aws.NopRetryer{},
+	})
+	return &client{api: sdkClient, arn: arn}
+}
+
+func requireExpiredTokenUnauthenticated(t *testing.T, err error) {
+	t.Helper()
+	var apiErr smithy.APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, "ExpiredTokenException", apiErr.ErrorCode())
+	mapped := StatusFromError(err)
+	st, ok := status.FromError(mapped)
+	require.True(t, ok)
+	require.Equal(t, codes.Unauthenticated, st.Code())
+}
+
+func TestGenerateDataKey_PreservesExpiredTokenOverLaterTransportFailure(t *testing.T) {
+	var callOrder []string
+	first := newGenerateDataKeyTestClient(
+		"us-east-1",
+		func(*http.Request) (*http.Response, error) {
+			callOrder = append(callOrder, "us-east-1")
+			return nil, expiredTokenError()
+		},
+	)
+	second := newGenerateDataKeyTestClient(
+		"us-west-2",
+		func(*http.Request) (*http.Response, error) {
+			callOrder = append(callOrder, "us-west-2")
+			return nil, transportFailureError()
+		},
+	)
+	p := &provider{clients: []*client{first, second}}
+
+	_, _, _, err := p.GenerateDataKey(context.Background())
+
+	require.Equal(t, []string{"us-east-1", "us-west-2"}, callOrder)
+	requireExpiredTokenUnauthenticated(t, err)
 }

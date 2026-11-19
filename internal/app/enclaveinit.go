@@ -25,12 +25,11 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// initRetryAttempts is the total number of Initialize attempts.
+// initRetryAttempts is the maximum number of Initialize attempts.
 const initRetryAttempts = 3
 
-// initRetryBackoff is the fixed delay between Initialize retry attempts.
-// Overridable via package-private var for tests so the retry table does
-// not block test runs for several seconds.
+// initRetryBackoff is the fixed delay between Initialize attempts. Tests can
+// change this package variable.
 var initRetryBackoff = 1 * time.Second
 
 type enclaveKeySource struct {
@@ -38,20 +37,12 @@ type enclaveKeySource struct {
 	generateNew pb.Algorithm
 }
 
-// initializeEnclave runs the host-side enclave initialization flow.
-// Normal production and development use the AWS default credential chain.
-// When LocalStack is enabled with an endpoint, the host uses static placeholder
-// credentials.
-// The function sends the credentials to the enclave in the Initialize RPC.
-// It retries transient failures for up to initRetryAttempts total attempts.
-// It returns all errors to app.Run. The caller supplies a cancellable startup
-// context with the total budget.
+// initializeEnclave gets temporary AWS credentials. It calls Initialize with
+// one key source. It retries transient failures up to initRetryAttempts times.
+// The caller reports non-retryable failures.
 //
-// Credentials and the request struct live only inside this function's
-// stack frame and are not retained by the Service. Strings are
-// proto-generated and cannot be explicitly zeroed; we rely on the
-// frame going out of scope plus the runtime eventually reusing the
-// memory.
+// This function does not retain the credentials or request. Go does not
+// provide a standard way to clear string data from memory.
 func initializeEnclave(
 	ctx context.Context,
 	enclavePvd pb.EnclaveServiceClient,
@@ -106,8 +97,11 @@ func initializeEnclave(
 		code := status.Code(err)
 		switch code {
 		case codes.Unauthenticated, codes.Unavailable, codes.DeadlineExceeded:
-			// Retry DeadlineExceeded only while the caller's total startup
-			// budget permits another attempt.
+			// An Unauthenticated response causes a retry because the next
+			// attempt refreshes cached credentials.
+			// DeadlineExceeded is retryable because enclave cold start can
+			// exceed a single Initialize RPC deadline; subsequent attempts
+			// hit a warm enclave.
 			lastErr = err
 			invalidateCredentials = code == codes.Unauthenticated
 			if attempt < initRetryAttempts {
@@ -124,7 +118,8 @@ func initializeEnclave(
 		}
 
 		if attempt < initRetryAttempts {
-			// Keep the backoff inside the cancellable startup budget.
+			// Use a context-aware delay so cancellation or the total startup
+			// deadline stops the retry backoff.
 			select {
 			case <-ctx.Done():
 				return nil, fmt.Errorf("enclave Initialize aborted during retry backoff: %w", ctx.Err())

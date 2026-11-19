@@ -54,7 +54,6 @@ func newTestAwsCfg(t *testing.T) aws.Config {
 }
 
 var testArns = []string{"arn:aws:kms:us-east-1:000000000000:key/abc"}
-var testKeySource = enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519}
 
 func TestInitializeEnclave_Success(t *testing.T) {
 	withFastBackoff(t)
@@ -67,8 +66,17 @@ func TestInitializeEnclave_Success(t *testing.T) {
 		Return(&pb.InitializeResponse{}, nil).
 		Times(1)
 
-	_, err := initializeEnclave(context.Background(), mockClient, newTestAwsCfg(t), testArns, false, testKeySource, logging.Get("test"))
+	resp, err := initializeEnclave(
+		context.Background(),
+		mockClient,
+		newTestAwsCfg(t),
+		testArns,
+		false,
+		enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519},
+		logging.Get("test"),
+	)
 	require.NoError(t, err)
+	require.NotNil(t, resp)
 }
 
 func TestInitializeEnclave_RequestShape(t *testing.T) {
@@ -86,7 +94,15 @@ func TestInitializeEnclave_RequestShape(t *testing.T) {
 		}).
 		Times(1)
 
-	_, err := initializeEnclave(context.Background(), mockClient, newTestAwsCfg(t), testArns, true, testKeySource, logging.Get("test"))
+	_, err := initializeEnclave(
+		context.Background(),
+		mockClient,
+		newTestAwsCfg(t),
+		testArns,
+		true,
+		enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519},
+		logging.Get("test"),
+	)
 	require.NoError(t, err)
 	require.NotNil(t, captured)
 	require.NotNil(t, captured.Credentials)
@@ -146,7 +162,15 @@ func TestInitializeEnclave_RetriesUnavailableThenSucceeds(t *testing.T) {
 		mockClient.EXPECT().Initialize(gomock.Any(), gomock.Any()).Return(&pb.InitializeResponse{}, nil),
 	)
 
-	_, err := initializeEnclave(context.Background(), mockClient, newTestAwsCfg(t), testArns, false, testKeySource, logging.Get("test"))
+	_, err := initializeEnclave(
+		context.Background(),
+		mockClient,
+		newTestAwsCfg(t),
+		testArns,
+		false,
+		enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519},
+		logging.Get("test"),
+	)
 	require.NoError(t, err)
 }
 
@@ -184,7 +208,7 @@ func TestInitializeEnclave_RetrievesCredentialsForEachAttempt(t *testing.T) {
 		aws.Config{Region: "us-east-1", Credentials: credentialsProvider},
 		testArns,
 		false,
-		testKeySource,
+		enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519},
 		logging.Get("test"),
 	)
 
@@ -227,7 +251,7 @@ func TestInitializeEnclave_InvalidatesCachedCredentialsAfterUnauthenticated(t *t
 		aws.Config{Region: "us-east-1", Credentials: cachedCredentials},
 		testArns,
 		false,
-		testKeySource,
+		enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519},
 		logging.Get("test"),
 	)
 
@@ -247,7 +271,15 @@ func TestInitializeEnclave_ExhaustsRetriesOnUnavailable(t *testing.T) {
 		Return(nil, unavailErr).
 		Times(initRetryAttempts)
 
-	_, err := initializeEnclave(context.Background(), mockClient, newTestAwsCfg(t), testArns, false, testKeySource, logging.Get("test"))
+	_, err := initializeEnclave(
+		context.Background(),
+		mockClient,
+		newTestAwsCfg(t),
+		testArns,
+		false,
+		enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519},
+		logging.Get("test"),
+	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, unavailErr)
 	require.Contains(t, err.Error(), "exhausted")
@@ -265,7 +297,15 @@ func TestInitializeEnclave_RetriesDeadlineExceededThenSucceeds(t *testing.T) {
 		mockClient.EXPECT().Initialize(gomock.Any(), gomock.Any()).Return(&pb.InitializeResponse{}, nil),
 	)
 
-	_, err := initializeEnclave(context.Background(), mockClient, newTestAwsCfg(t), testArns, false, testKeySource, logging.Get("test"))
+	_, err := initializeEnclave(
+		context.Background(),
+		mockClient,
+		newTestAwsCfg(t),
+		testArns,
+		false,
+		enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519},
+		logging.Get("test"),
+	)
 	require.NoError(t, err)
 }
 
@@ -277,7 +317,15 @@ func TestInitializeEnclave_EmptyKmsKeyArnsRejected(t *testing.T) {
 	// Mock not expected to be called — guard fires before any RPC.
 	mockClient := enclaveProvider.NewMockEnclaveServiceClient(ctrl)
 
-	_, err := initializeEnclave(context.Background(), mockClient, newTestAwsCfg(t), nil, false, testKeySource, logging.Get("test"))
+	_, err := initializeEnclave(
+		context.Background(),
+		mockClient,
+		newTestAwsCfg(t),
+		nil,
+		false,
+		enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519},
+		logging.Get("test"),
+	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "kmsKeyArns must not be empty")
 }
@@ -294,7 +342,15 @@ func TestInitializeEnclave_NonRetryablePermissionDenied(t *testing.T) {
 		Return(nil, deniedErr).
 		Times(1)
 
-	_, err := initializeEnclave(context.Background(), mockClient, newTestAwsCfg(t), testArns, false, testKeySource, logging.Get("test"))
+	_, err := initializeEnclave(
+		context.Background(),
+		mockClient,
+		newTestAwsCfg(t),
+		testArns,
+		false,
+		enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519},
+		logging.Get("test"),
+	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, deniedErr)
 	require.Contains(t, err.Error(), "non-retryable")
@@ -312,7 +368,15 @@ func TestInitializeEnclave_NonRetryableInvalidArgument(t *testing.T) {
 		Return(nil, invalidErr).
 		Times(1)
 
-	_, err := initializeEnclave(context.Background(), mockClient, newTestAwsCfg(t), testArns, false, testKeySource, logging.Get("test"))
+	_, err := initializeEnclave(
+		context.Background(),
+		mockClient,
+		newTestAwsCfg(t),
+		testArns,
+		false,
+		enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519},
+		logging.Get("test"),
+	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, invalidErr)
 	require.Contains(t, err.Error(), "non-retryable")
@@ -333,7 +397,15 @@ func TestInitializeEnclave_NonRetryableInternal(t *testing.T) {
 	// codes.Internal is not in the retryable list and not in the
 	// explicit non-retryable-with-distinct-message list, so it falls
 	// through to the default branch — single attempt, surface error.
-	_, err := initializeEnclave(context.Background(), mockClient, newTestAwsCfg(t), testArns, false, testKeySource, logging.Get("test"))
+	_, err := initializeEnclave(
+		context.Background(),
+		mockClient,
+		newTestAwsCfg(t),
+		testArns,
+		false,
+		enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519},
+		logging.Get("test"),
+	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, internalErr)
 	require.Contains(t, err.Error(), "code=Internal")
@@ -362,7 +434,15 @@ func TestInitializeEnclave_CtxCancelledDuringBackoff(t *testing.T) {
 	cancel() // pre-cancelled so the select fires Done immediately on the first sleep
 
 	start := time.Now()
-	_, err := initializeEnclave(ctx, mockClient, newTestAwsCfg(t), testArns, false, testKeySource, logging.Get("test"))
+	_, err := initializeEnclave(
+		ctx,
+		mockClient,
+		newTestAwsCfg(t),
+		testArns,
+		false,
+		enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519},
+		logging.Get("test"),
+	)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
@@ -385,12 +465,22 @@ func TestInitializeEnclave_TotalTimeoutEnforcedAcrossRetries(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
+
 	start := time.Now()
-	_, err := initializeEnclave(ctx, mockClient, newTestAwsCfg(t), testArns, false, testKeySource, logging.Get("test"))
+	_, err := initializeEnclave(
+		ctx,
+		mockClient,
+		newTestAwsCfg(t),
+		testArns,
+		false,
+		enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519},
+		logging.Get("test"),
+	)
+	elapsed := time.Since(start)
 
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Less(t, time.Since(start), initRetryBackoff)
+	require.Less(t, elapsed, initRetryBackoff, "must abort on total timeout rather than waiting full retry backoff")
 }
 
 func TestInitializeEnclave_CredentialsRetrieveError(t *testing.T) {
@@ -406,7 +496,15 @@ func TestInitializeEnclave_CredentialsRetrieveError(t *testing.T) {
 		Credentials: failingCredentialProvider{},
 	}
 
-	_, err := initializeEnclave(context.Background(), mockClient, awsCfg, testArns, false, testKeySource, logging.Get("test"))
+	_, err := initializeEnclave(
+		context.Background(),
+		mockClient,
+		awsCfg,
+		testArns,
+		false,
+		enclaveKeySource{generateNew: pb.Algorithm_ALGORITHM_ED25519},
+		logging.Get("test"),
+	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "retrieve aws credentials")
 }

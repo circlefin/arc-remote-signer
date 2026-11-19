@@ -5,7 +5,7 @@ on:
     types: [labeled, synchronize]
     branches:
       - main
-      - release/*
+      - release/v*
   push:
     tags:
       - "v*"

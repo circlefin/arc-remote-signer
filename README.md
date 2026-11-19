@@ -2,7 +2,7 @@
 
 Secure cryptographic signing service for Arc Chain validators, powered by AWS Nitro Enclaves — also known as **Nitro Enclave Signer**.
 
-![Go Version](https://img.shields.io/badge/go-1.25-blue)
+![Go Version](https://img.shields.io/badge/go-1.26-blue)
 
 ---
 
@@ -31,7 +31,7 @@ Get the service running locally in 3 steps:
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - Docker and Docker Compose
 - Make
 
@@ -183,7 +183,7 @@ func main() {
 }
 ```
 
-The example uses the default plaintext listener for local development. Production can enable server-authenticated TLS with the `APP_PUBLIC_SERVER_TLS_ENABLED`, `APP_PUBLIC_SERVER_TLS_CERT`, and `APP_PUBLIC_SERVER_TLS_KEY` settings documented in [`docs/architecture.md`](./docs/architecture.md#common-production-settings). It can optionally require client certificates by enabling `APP_PUBLIC_SERVER_TLS_CLIENTAUTH_ENABLED` and configuring `APP_PUBLIC_SERVER_TLS_CLIENTAUTH_CA` with a dedicated client CA bundle. The application authenticates membership in that CA; restricting access to Malachite depends on provisioning its client certificates exclusively to that workload.
+The example uses the default plaintext listener for local development. Production can enable server-authenticated TLS with the `APP_PUBLIC_SERVER_TLS_ENABLED`, `APP_PUBLIC_SERVER_TLS_CERT`, and `APP_PUBLIC_SERVER_TLS_KEY` settings documented in [`docs/architecture.md`](./docs/architecture.md#common-production-settings). It can also require client certificates with `APP_PUBLIC_SERVER_TLS_CLIENTAUTH_ENABLED` and `APP_PUBLIC_SERVER_TLS_CLIENTAUTH_CA`. The application checks that each client certificate comes from the configured CA. Give client certificates only to authorized Malachite workloads. A version 2 signing request must include a stable `replica_name`. The signer uses this caller-provided name as the replica identity. When client authentication is enabled, the signer compares the full name with one absolute URI SAN. If the certificate has no usable URI SAN, has more than one URI SAN, or has a different URI SAN, the signer logs a warning and continues the request.
 
 ### EnclaveService API (Internal)
 
@@ -198,7 +198,7 @@ The host application calls this API over TCP in dev/CI or VSOCK in Nitro
 production. Arc Chain validators do not interact with this API directly.
 `Initialize` generates or recovers the signing key and returns its public key
 and attestation. `GetPublicKey` refreshes the public-key attestation.
-`SignMessage` receives only the message. `GenerateKey` is retained for protocol
+`SignMessage` receives the message and optional signing metadata. `GenerateKey` is retained for protocol
 compatibility and rejects direct key generation.
 
 ## Deployment
@@ -294,6 +294,41 @@ make test-reproducibility
 ```
 
 > **Note:** Updating any digest pin in `docker/Dockerfile.enclave` will change the enclave image and invalidate existing PCR hashes. See the warning in the Dockerfile header.
+
+## Go dependency sources
+
+Docker builds default to `https://proxy.golang.org,direct` and need no
+Cloudsmith credentials. To use the same source for host Go commands, export:
+
+```shell
+export GOPROXY=https://proxy.golang.org,direct
+```
+
+Docker Bake forwards `GOPROXY` to every Go build stage. Direct `docker build`
+commands can select a different source with `--build-arg GOPROXY=...`.
+
+### Authenticated Cloudsmith builds
+
+For environments that require Cloudsmith, export the approved proxy list and
+credentials before building:
+
+```shell
+export GOPROXY="https://golang.cloudsmith.io/<organization>/<repository>/"
+export CLOUDSMITH_USER="<your-cloudsmith-username>"
+export CLOUDSMITH_TOKEN="<your-api-key>"
+make local-enclave-docker
+```
+
+Docker Bake passes the username as a build argument and the token as a
+BuildKit secret. Build steps create a temporary netrc and remove it after the
+command succeeds or fails. Selecting Cloudsmith requires both credentials;
+a missing credential fails the build without switching to the public proxy.
+Do not append `direct` or public proxies to a Cloudsmith-only proxy list.
+
+Host Go commands also need a netrc entry for `golang.cloudsmith.io`; exporting
+credentials alone does not authenticate Go. Use a netrc with mode `0600`, or
+use your CI environment's approved dependency setup. Keep credentials out of
+proxy URLs and Docker build arguments.
 
 ## Development
 

@@ -47,7 +47,13 @@ regional endpoint from the route header. It limits routes to regions from the
 configured ARNs. For LocalStack, the host proxy dials the fixed LocalStack
 service endpoint. Nitro mode does not support LocalStack.
 
-- **Host application** (`app run`, `internal/app/`) — handles incoming validator gRPC requests, persists the wrapped key in Secrets Manager, and passes temporary AWS credentials, KMS key ARNs, and the LocalStack selector during enclave initialization. It does not construct KMS requests or handle plaintext data keys.
+- **Host application** (`app run`, `internal/app/`) — serves the version 1 and
+  version 2 signer APIs. The host application persists the wrapped key in
+  Secrets Manager. The host application enforces the durable watermark for
+  version 2 in DynamoDB. It passes temporary AWS credentials, KMS key ARNs, and
+  the LocalStack selector during enclave initialization. The host application
+  does not construct KMS requests. The host application does not handle
+  plaintext data keys.
 - **KMS traffic proxy** (`app run-vsockproxy`, `internal/vsockproxy/`) — runs as a separate host process. It forwards opaque KMS traffic to LocalStack or to AWS regions from the configured KMS key ARNs.
 - **Enclave application** (`internal/enclave/`) — owns the AWS KMS client and performs all cryptographic operations (data-key mint/decrypt, key generation, decryption, signing), manages key material in memory, and requests attestation documents from the Nitro Security Module (NSM).
 
@@ -60,95 +66,111 @@ The following sections describe how the runtime processes interact, from initial
 ### Startup Sequence
 
 On startup, the host reads the configured secret from Secrets Manager. The host
-asks the enclave to recover the stored key or generate a new key. The host
-retrieves temporary AWS credentials for each `Initialize` attempt. The host
-refreshes the credentials after an authentication failure. The host sends the
-credentials, KMS key ARNs, LocalStack selector, and key source in the request.
-
-Each enclave attempt requests a fresh KMS Recipient attestation in Nitro mode.
-The attempt creates an ephemeral KMS provider and completes the key transaction.
-The transaction generates or recovers the signing key and creates a public key
-attestation. The enclave publishes the Ready state only after the complete
-transaction succeeds. A failed attempt does not install a key.
+also gets temporary AWS credentials. The host reads the KMS settings. If the secret
+contains a key envelope, the host calls Enclave `Initialize` with that envelope.
+If the secret is empty, the host calls `Initialize` with the configured
+algorithm. The enclave recovers or generates the signing key. In Nitro mode,
+the enclave asks NSM to make a signed attestation for the public key. The
+enclave sets the Ready state only after all required operations succeed.
 
 ```
-Host application                    Enclave                    NSM / AWS KMS
-       │                                │                            │
-       │── read stored envelope         │                            │
-       │── retrieve credentials         │                            │
-       │── Initialize(key source, ─────▶│                            │
-       │     credentials, KMS settings) │── fresh recipient attest ─▶│
-       │                                │── generate or recover key ─▶│
-       │                                │── attest public key ───────▶│
-       │                                │── publish Ready             │
-       │◀─ public key, attestation, ─────│                            │
-       │   optional generated envelope  │                            │
-       │── persist generated envelope   │                            │
+Host application       Secrets Manager       Enclave                 AWS KMS
+       │                       │                  │                       │
+       │── GetSecretValue ────▶│                  │                       │
+       │◀─ envelope or empty ──│                  │                       │
+       │                       │                  │                       │
+       │── Initialize(source, credentials, ARNs) ▶│                       │
+       │                       │                  │── Decrypt or          │
+       │                       │                  │   GenerateDataKey ───▶│
+       │                       │                  │◀─ key data ───────────│
+       │◀─ key + document + optional envelope ───│                       │
+       │── PutSecretValue ────▶│  (new key only)  │                       │
+       │                       │                  │                       │
   [ready to serve requests]
 ```
 
 ### Key Generation Flow
 
-Key generation is triggered when the configured, pre-created Secrets Manager secret has no stored key value:
+Key generation occurs when the configured Secrets Manager secret is empty.
+`Initialize` calls KMS `GenerateDataKey`. `Initialize` makes the signing key.
+`Initialize` encrypts the private key. `Initialize` returns a `SecretEnvelope`.
+The host validates the envelope. The host writes the envelope to Secrets
+Manager. The host does not start the public signer before this write succeeds.
 
-1. The host calls Enclave `Initialize` with `generate_new` set to the configured algorithm.
-2. The enclave creates an ephemeral KMS provider for the attempt. In Nitro mode, the provider uses a fresh KMS Recipient attestation.
-3. The enclave calls KMS `GenerateDataKey`. KMS returns `CiphertextForRecipient` in Nitro mode, and the enclave decrypts it with its in-memory RSA private key. KMS returns the plaintext data key in dev/CI.
-4. The enclave generates the signing keypair and encrypts the private key with AES-GCM. It creates `SecretEnvelope { algorithm, kms_encrypted_data_key, encrypted_private_key, nonce }`.
-5. In Nitro mode, the enclave creates an attestation document for the public key.
-6. The enclave installs the signing key and publishes the Ready state.
-7. The enclave returns the public key, attestation document, and generated envelope. The host maps the envelope to a stored `Header` and writes it to Secrets Manager.
-
-```
-Host application      Enclave              NSM / AWS KMS          Secrets Manager
-       │                  │                       │                         │
-       │── Initialize ───▶│                       │                         │
-       │   (generate_new) │── GenerateDataKey ───▶│                         │
-       │                  │◀─ ciphertext blobs ───│                         │
-       │                  │  enclave decrypts data key and wraps signing key│
-       │                  │── enclave requests public-key attestation ─▶│   │
-       │                  │◀─ NSM returns attestation document ─│            │
-       │                  │  enclave publishes Ready                         │
-       │◀─ key + document │                       │                         │
-       │   + envelope     │                       │                         │
-       │── PutSecret(Header from envelope) ────────────────────────────────▶│
-       │                  │                       │                         │
-```
-
-The host persists a generated `SecretEnvelope`. It keeps the public key and its
-attestation document in memory. Only enclave memory contains the plaintext
-private key and plaintext data key.
+The host keeps only the public key and its attestation document in memory after
+startup. Only enclave memory contains the plaintext private key and plaintext
+data key.
 
 ### Signing Flow
 
-After successful initialization, signing uses only the installed enclave key:
+The host does not keep the `SecretEnvelope` after startup. The host does not
+read Secrets Manager during signing.
 
-1. The host sends only the message to Enclave `SignMessage`.
-2. The enclave signs the message with the installed key.
-3. The enclave returns the signature.
+Version 1 uses this signing process:
+
+1. The host validates the message.
+2. The host sends the message to the enclave `SignMessage` RPC.
+3. The enclave signs the message with the key in the Ready state.
+
+Version 2 adds durable and in-memory watermark enforcement:
+
+1. The host validates the message and metadata.
+2. The host derives a watermark candidate.
+3. The host acquires the signing permit shared by all watermarked kinds.
+4. The host calls `CompareAndAdvance` in the durable repository.
+5. The host calls the enclave only after a confirmed advance or an identical retry.
+6. The host sends the original message and metadata to the enclave `SignMessage` RPC.
+7. The enclave gets the key from the Ready state.
+8. The enclave applies the in-memory watermark.
+9. The enclave signs the message.
+10. The host releases the signing permit after the enclave call returns.
+
+Waiting for the permit respects request cancellation and deadlines.
+`VALIDATOR_PROOF`, `TELEMETRY`, and `DELEGATION` requests do not acquire the permit.
+
+The host does not use the durable repository for `VALIDATOR_PROOF`,
+`TELEMETRY`, or `DELEGATION` requests. The enclave does not apply its in-memory
+watermark to these requests. The host and enclave require this 49-byte telemetry message:
+`arc/telemetry/v1\0` followed by a 32-byte digest. A repository failure stops
+a watermarked request before the enclave call. Version 2 does not call version
+1 after a failure.
+
+For signer v2 `DELEGATION` requests, height and round must be absent. The host
+and enclave require exactly 130 bytes. The message starts with `arc/auth/v1\0`,
+a one-byte domain length of 9, and `arc-boost`. The host forwards the original bytes. The enclave
+signs them without advancing its watermark. The node must use v2 and must not
+send a delegation under a different kind when the signer does not support it.
+
+These prefix, length, and domain checks apply only to `DELEGATION` requests.
+Version 1 and `VALIDATOR_PROOF` retain opaque-byte signing. Those paths can sign
+delegation-prefixed bytes without applying the delegation format checks.
 
 ```
-Validator          Host application       Enclave
-    │                      │                  │
-    │── Sign(msg) ────────▶│                  │
-    │                      │── SignMessage ──▶│
-    │                      │   (message only) │── sign with installed key
-    │                      │◀─ signature ─────│
-    │◀─ signature ─────────│                  │
+Validator       Host application       DynamoDB       Enclave       AWS KMS
+    │                   │                  │              │              │
+    │── v2 Sign ───────▶│                  │              │              │
+    │                   │── CompareAnd ───▶│              │              │
+    │                   │   Advance        │              │              │
+    │                   │◀─ confirmed ─────│              │              │
+    │                   │── SignMessage(metadata) ───────▶│              │
+    │                   │                  │              │ watermark;   │
+    │                   │                  │              │ sign         │
+    │                   │◀─ signature ────────────────────│              │
+    │◀─ signature ──────│                  │              │              │
 ```
 
-Steady-state signing does not send the envelope and does not call KMS or
-Secrets Manager.
+The host does not use DynamoDB for version 1, `VALIDATOR_PROOF`, `TELEMETRY`,
+or `DELEGATION` requests.
 
 ### Public Key Attestation Flow
 
-During signer initialization, Enclave `Initialize` returns the installed public
-key and its attestation document. In Nitro mode, the enclave asks NSM to create
-the document before it publishes the Ready state. The signed `user_data` field
-contains the exact public key bytes. The host keeps the public key and document
-in memory. It also reads the earliest certificate expiry from the document.
-The background refresh process uses Enclave `GetPublicKey` to create a later
-attestation document for the installed key.
+During signer initialization, Enclave `Initialize` returns the public key and
+its attestation document. The host keeps both values in memory. The host also reads
+the earliest certificate expiry from the document. For a refresh, the host
+calls Enclave `GetPublicKey` with an empty request. The enclave gets the public
+key from the Ready state. In Nitro mode, the enclave asks NSM to make a signed
+attestation document. The signed `user_data` field contains the exact public
+key bytes.
 
 Each public `SignerService.PublicKey` request returns the pair from host memory.
 The request does not call the enclave or NSM. The request does not contain a
@@ -171,10 +193,7 @@ returns an empty attestation document.
 ```
 Signer startup     Host application       Enclave                  NSM
     │                      │                  │                       │
-    │                      │── Initialize ───▶│                       │
-    │                      │                  │── Attest(public key) ▶│
-    │                      │                  │◀─ signed document ────│
-    │                      │◀─ key + document │                       │
+    │                      │◀─ Initialize response                     │
     │                      │  cache pair      │                       │
     │                      │                  │                       │
 Validator                  │                  │                       │
@@ -772,7 +791,14 @@ because it binds to the parent EC2 instance. Add the ARN for a replica to
 
 ##### Instance replacement procedure
 
-Follow these steps to replace the parent EC2 instance without service interruption:
+This procedure assumes the old and new releases use the same watermark
+storage layout. An upgrade from namespace items to aggregate state requires
+stopping every old signer before starting the new signer in step 4. Validate
+the legacy watermark data and runtime IAM permissions before the upgrade.
+After the first aggregate write, do not restart the legacy release for rollback.
+This storage migration requires a coordinated cutover with a signing outage.
+
+Follow these steps to replace the parent EC2 instance with the same storage layout:
 
 1. **Launch the new instance**:
    Launch a new EC2 instance with Nitro Enclaves enabled.
@@ -940,15 +966,87 @@ aws secretsmanager create-secret \
 
 You will pass this name (or its full ARN) to the signer via `APP_SERVICE_SIGNER_KEYID`. On first run, if the secret has no stored value, the signer generates a new key and writes it automatically — no manual initialization needed.
 
+#### DynamoDB table for version 2
+
+Before starting a signer that serves version 2, provision the `watermarks`
+table in the region selected by the host AWS configuration. The table name
+is fixed. Use a single-region table. Do not use an MREC global table, because
+its region-local conditional writes cannot enforce one shared signing state.
+
+The table requires these keys:
+
+| Attribute | DynamoDB type | Key role |
+| --- | --- | --- |
+| `validator_id` | String | Partition key |
+| `namespace` | String | Sort key |
+
+The partition value is the validator public key encoded as lowercase
+hexadecimal. The `namespace` value is `state` for the aggregate watermark,
+`lease` for the lease, or `session#<replica_name>` for a node session.
+These item types share the table. They require no secondary indexes or
+additional table attribute definitions.
+
+For a new table, run the following commands with a provisioning role. Replace
+the example region with the host region. The provisioning role needs
+`dynamodb:CreateTable` and `dynamodb:DescribeTable` for creation and the waiter.
+
+```bash
+aws dynamodb create-table \
+  --region us-east-1 \
+  --table-name watermarks \
+  --attribute-definitions \
+    AttributeName=validator_id,AttributeType=S \
+    AttributeName=namespace,AttributeType=S \
+  --key-schema \
+    AttributeName=validator_id,KeyType=HASH \
+    AttributeName=namespace,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST \
+  --deletion-protection-enabled
+aws dynamodb wait table-exists --region us-east-1 --table-name watermarks
+```
+
+If the table already has these keys, reuse it. Adding lease and session records
+requires no table schema change or migration of aggregate watermark items.
+Do not pre-create lease or session items. The repository creates them on the
+first accepted write. Lease expiry and revocation deadlines use Unix
+milliseconds checked by the host. Do not configure them as DynamoDB TTL
+attributes or expire watermark items.
+
+The lease repository is not yet connected to the RPC handlers. This change
+alone does not enable leases or write lease and session items. Before deploying
+handlers that use it, add `dynamodb:DeleteItem` to the host role so graceful
+release can delete its matching session.
+
 #### IAM role on the EC2 host
 
+In addition to the Secrets Manager policies below, attach a DynamoDB statement
+to the host role for version 2. Replace the region and account ID with the
+values for the table. `GetItem` and `UpdateItem` support watermarks and leases.
+`DeleteItem` supports session release. This permission covers the table,
+including watermark items, so grant it only to the intended signer role.
+
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "dynamodb:GetItem",
+    "dynamodb:UpdateItem",
+    "dynamodb:DeleteItem"
+  ],
+  "Resource": "arn:aws:dynamodb:us-east-1:000000000000:table/watermarks"
+}
+```
+
+The host role does not need table creation, table deletion, scan, query, or
+transaction permissions for these repositories. The dev CI smoke policy is
+managed separately from the production host role. Updating the CI policy does
+not update production permissions.
+
 The signer writes to Secrets Manager only during **first-run key generation**.
-During this run, the configured secret has no stored value. The host calls
-`Initialize` with `generate_new` and persists the wrapped key with
-`secretsmanager:PutSecretValue` (see [Key Generation Flow](#key-generation-flow)).
-Once a non-empty secret exists, every subsequent startup calls `Initialize`
-with `existing_key` and does not call `PutSecretValue`. Steady-state operation
-needs read access only.
+When the configured secret is empty, the host calls `Initialize` with
+`generate_new`. The host stores the returned envelope with
+`secretsmanager:PutSecretValue`. When a secret contains an envelope, the host
+calls `Initialize` with `existing_key`. The host does not call `PutSecretValue`.
 
 Remove `secretsmanager:PutSecretValue` permission after bootstrap because the
 long-running host proxy is untrusted. Authorize write access for the bootstrap run
@@ -1007,12 +1105,17 @@ The trailing `-*` on the secret ARN is required because Secrets Manager appends 
 
 Perform these steps once per validator secret, in order. The goal is to leave the long-running host with read-only Secrets Manager access.
 
-1. **Bootstrap run.** Deploy the signer under the bootstrap policy. On first run, the empty secret makes the host call `Initialize` with `generate_new`. The host writes the returned wrapped key with `PutSecretValue`.
+1. **Bootstrap run.** Deploy the signer under the bootstrap policy. On the
+   first run, the empty secret causes the host to call
+   `Initialize(generate_new)`. The host writes the returned wrapped key with
+   `PutSecretValue`.
 2. **Confirm the wrapped key was stored.** Before removing write access, verify the secret now holds a non-empty value — for example, `aws secretsmanager get-secret-value --secret-id arc-chain/dev/validator-1/key --query SecretString --output text` returns the base64 envelope. Do not proceed until this succeeds.
 3. **Switch to the runtime role.** Move the host to the runtime policy (drop `PutSecretValue`), and **invalidate the bootstrap access**: remove, expire, or explicitly revoke the bootstrap role/session so its write permission can no longer be assumed.
 4. **Verify write access is gone.** Under the runtime role, confirm `secretsmanager:PutSecretValue` on the validator secret returns `AccessDenied` (for example, a `put-secret-value` call is rejected). A successful denial confirms a compromised host proxy can no longer overwrite or evict the recoverable validator key.
 
-An existing non-empty secret makes the host call `Initialize` with `existing_key`. Restarts and redeployments do not call `PutSecretValue`, so the runtime role needs no write access.
+If the secret contains a key, the host loads the key. The host does not call
+`PutSecretValue`. Restarts and redeployments under the runtime role do not need
+write access.
 
 #### Wiring it up
 
@@ -1090,7 +1193,44 @@ export APP_METRICS_PROMETHEUS_PORT=9090
 export APP_METRICS_PROMETHEUS_PATH=/metrics
 ```
 
-`APP_PROVIDER_SECRETS_LOCALSTACK_REGION` is a development/LocalStack setting and is not the production AWS region selector. The public gRPC listener is plaintext by default. Enabling the server certificate settings provides server-authenticated TLS; enabling client authentication additionally requires certificates issued by the configured client CA. Client authentication fails startup when TLS is disabled or the CA path is missing, unreadable, empty, or not composed entirely of valid PEM-encoded X.509 certificates. The application verifies CA membership rather than a specific SAN or SPIFFE identity, so the client CA must be dedicated to authorized Malachite workloads.
+`APP_PROVIDER_SECRETS_LOCALSTACK_REGION` is a development/LocalStack setting. It is not the production AWS region selector. The public gRPC listener is plaintext by default. The server certificate settings enable server-authenticated TLS. Client authentication also requires certificates from the configured client CA. Startup fails when TLS is disabled or when the CA path is missing, unreadable, empty, or contains invalid PEM-encoded X.509 certificates. The application checks that the client certificate comes from this CA. The client CA must issue certificates only to authorized Malachite workloads.
+
+The version 2 `Sign` method requires a stable `replica_name` in each request. The caller supplies this name. The host uses it as the replica identity. When client authentication is enabled, the host compares the full name with one absolute URI SAN in the verified client certificate. The host logs a warning and continues the request when the certificate has no usable URI SAN, has more than one URI SAN, or has a different URI SAN. This check does not prove that the caller owns the name. Certificate renewal and pod restart do not change the identity when the request keeps the same name. This identity does not prove write-ahead log continuity. A validator must restore its write-ahead log before it resumes signing with the same name.
+
+The fixed watermark table name is `watermarks`. The repository uses the region
+and credentials from the host AWS configuration. The validator public key in
+lowercase hexadecimal form identifies the repository. Each validator uses one
+aggregate item containing all four watermark kinds, a version, and the owner of
+the highest height. The repository reads that item consistently at startup and
+caches it. Each new signature uses a version-conditional write. A failed
+condition returns the current item, which replaces the cache before retry. The
+repository refreshes with a consistent read before it refuses a request. An
+identical retry keeps the watermarks and owner unchanged, but it increments the
+version with a conditional write. This makes cross-kind vote ordering and
+height ownership part of the same durable decision.
+
+The runtime role needs `dynamodb:GetItem`, `dynamodb:UpdateItem`, and
+`dynamodb:DeleteItem` on the table ARN. DeleteItem removes a matching session
+record on graceful lease release. The role does not need permission to create
+or delete tables.
+
+Before upgrading from namespace items, stop all signer hosts for each validator.
+Confirm that each legacy tuple and message hash is valid. Every existing owner
+attribute must contain a valid replica name. All items at the greatest height
+must have the same non-empty owner. Correct ambiguous or malformed data through
+an authorized operator procedure before starting the new release. The first
+accepted request creates the aggregate item. Do not mix legacy and aggregate
+writers, or roll back to the legacy writer after migration.
+
+Operators must use the existing gRPC server metrics for version 2 method
+results and latency. Operators must use DynamoDB service metrics for repository
+health and latency. Operators must not alarm on every conditional-check
+failure. These failures are expected when concurrent writers race on the
+aggregate version; the repository retries from the current item returned by
+the failed conditional write. A sustained high rate can indicate unexpected
+writer contention. The version 2 service writes
+structured logs for repository failures. The runtime has no custom counters
+for watermark results or watermark latency.
 
 Client authentication covers every service on the public listener, including the gRPC health service. Before enabling it, configure Malachite and every health probe that uses port 10340 to present a trusted client certificate. Roll out the client identity and probe support before requiring client certificates on the server; otherwise the fail-closed handshake will make signing and health checks unavailable. This setting does not authenticate callers of the enclave's port 10350 TCP/VSOCK API.
 
@@ -1176,7 +1316,8 @@ Deployment scripts in `docker/`:
 
 ### Protocol Buffers
 
-- SignerService (public): `proto/arc/signer/v1/signer.proto`
+- SignerService version 1 (public): `proto/arc/signer/v1/signer.proto`
+- SignerService version 2 (public): `proto/arc/signer/v2/signer.proto`
 - EnclaveService (internal): `proto/arc/enclave/v1/enclave.proto`
 
 ### Supported Algorithms
@@ -1191,31 +1332,47 @@ Deployment scripts in `docker/`:
 | Method | Request | Response |
 |--------|---------|----------|
 | `PublicKey` | _(empty)_ | `public_key`, `attestation_document` |
-| `Sign` | `message bytes` | `signature bytes` |
+| Version 1 `Sign` | `message bytes` | `signature bytes` |
+| Version 2 `Sign` | `message bytes`, signing metadata | `signature bytes` |
 
 **EnclaveService** (internal, port 10350 over TCP in dev/CI or VSOCK in Nitro production):
 
 | Method | Request | Response |
 |--------|---------|----------|
-| `Initialize` | AWS credentials, KMS key ARNs, LocalStack selector, and one key source: `existing_key` or `generate_new` | `public_key`, `attestation_document`, and `secret_envelope` only for a generated key |
-| `GenerateKey` | `algorithm` | Returns `FAILED_PRECONDITION`. Use `Initialize` to generate a key. |
-| `GetPublicKey` | _(empty)_ | Installed `public_key`, `attestation_document` |
-| `SignMessage` | `message` | `signature` |
+| `Initialize` | AWS credentials, KMS key ARNs, LocalStack selector, key source | `public_key`, `attestation_document`, optional `secret_envelope` |
+| `GenerateKey` | `algorithm` | Returns `FAILED_PRECONDITION` |
+| `GetPublicKey` | _(empty)_ | `public_key`, `attestation_document` |
+| `SignMessage` | `message`, optional signing metadata | `signature` |
 
-`secret_envelope` is the wrapped key: `{ algorithm, kms_encrypted_data_key, encrypted_private_key, nonce }`. `Initialize` returns it when the enclave generates a key. The host persists it in Secrets Manager. On a later startup, the host sends it as `existing_key` in `Initialize`, and the enclave recovers the key. `GenerateKey` and `GetPublicKey` remain in the internal API for compatibility, but they are not the initialization path. For full field definitions, see the proto files listed above.
+`secret_envelope` is the wrapped key:
+`{ algorithm, kms_encrypted_data_key, encrypted_private_key, nonce }`.
+`Initialize(generate_new)` makes the `secret_envelope`. The host stores it in
+Secrets Manager.
+On a later startup, the host supplies it to `Initialize(existing_key)`.
 
 ### Error Handling
 
 | Code | Meaning | Common Causes |
 |------|---------|---------------|
 | `OK (0)` | Success | — |
-| `INVALID_ARGUMENT (3)` | Bad request | Missing or malformed message payload, unknown algorithm |
+| `INVALID_ARGUMENT (3)` | Bad request | Missing or malformed payload, invalid watermark candidate for version 2, unknown algorithm |
 | `PERMISSION_DENIED (7)` | KMS rejected the request | Invalid IAM/KMS permissions or attestation policy mismatch |
-| `FAILED_PRECONDITION (9)` | Operation requires the Ready state | `Initialize` has not completed, `GenerateKey` was called directly, or the enclave already has a different key source |
-| `INTERNAL (13)` | Server error | Uninitialized service state, enclave key unwrap/decryption error, signing failure |
+| `FAILED_PRECONDITION (9)` | Preconditions failed | KMS provider not ready or version 2 watermark violation |
+| `ABORTED (10)` | A different replica owns that height | Version 2 owner conflict |
+| `OUT_OF_RANGE (11)` | Tuple is below the watermark | The version 2 request contains a tuple below the current watermark |
+| `INTERNAL (13)` | Server error | Repository failure, corrupt or indeterminate watermark state, key recovery failure, signing failure |
 | `UNAVAILABLE (14)` | Dependency unavailable | Enclave transport failure, retryable KMS failure, or expired public key attestation |
 
 Secrets Manager is accessed during service initialization. Its failures prevent startup rather than returning a public signer RPC status.
+
+The caller-visible messages for version 2 are stable. See
+[Watermark Version 2 Signing Contract](specs/watermark-v2-signing-contract.md#host-enforcement).
+An owner conflict returns `ABORTED` with `other node signed`. This refusal is
+ADR-0007 `OtherNodeSigned`. The caller must handle this refusal as a signing
+refusal. It must not handle the refusal as a repository failure.
+If the service returns an indeterminate watermark result, the caller must retry
+the same request without changes. If the service reports corrupt watermark
+state, an operator must investigate the stored state before requests continue.
 
 ## Troubleshooting
 
@@ -1229,9 +1386,9 @@ Service fails with enclave connection error:
 
 Unexpected signing latency:
 
-- Verify that startup `Initialize` completed. It generates or recovers the key and installs it in the enclave.
-- Steady-state signing uses the installed key. It does not call KMS or Secrets Manager.
-- In Nitro mode, `Initialize` calls NSM for KMS Recipient attestation and public key attestation. A background task calls NSM again before the certificate for the public-key attestation expires.
+- Startup `Initialize` recovers or generates the enclave key.
+- Steady-state signing does not call KMS or Secrets Manager.
+- Signer initialization calls NSM in Nitro mode. A background task calls NSM again before the public key attestation certificate expires.
 - For sustained latency, inspect traces and enclave logs. When `APP_PROFILER_ENABLED=true`, inspect the Datadog continuous profiler output
 
 AWS permission errors:

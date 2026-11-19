@@ -35,6 +35,32 @@ fi
 
 echo "Secrets Manager is ready"
 
+# Verify that the watermark table is active and has deletion protection.
+echo "Checking watermark table..."
+table_status=$(aws dynamodb describe-table \
+    --table-name watermarks \
+    --query 'Table.TableStatus' \
+    --output text \
+    --endpoint-url=http://localhost:4566 \
+    --region us-east-1 2>/dev/null)
+if [ "${table_status}" != "ACTIVE" ]; then
+    echo "Watermark table is not ready"
+    exit 1
+fi
+
+deletion_protection=$(aws dynamodb describe-table \
+    --table-name watermarks \
+    --query 'Table.DeletionProtectionEnabled' \
+    --output text \
+    --endpoint-url=http://localhost:4566 \
+    --region us-east-1 2>/dev/null)
+if [[ "${deletion_protection}" != [Tt]rue ]]; then
+    echo "Watermark table deletion protection is not enabled"
+    exit 1
+fi
+
+echo "Watermark table is ready"
+
 # Check if replica key exists in us-west-2
 echo "Checking replica key in us-west-2..."
 if ! aws kms list-aliases --endpoint-url=http://localhost:4566 --region us-west-2 2>/dev/null | grep -q 'alias/dev-multi-region-crypto'; then

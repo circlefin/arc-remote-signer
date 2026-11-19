@@ -76,6 +76,7 @@ func newProvider(openSession nsmSessionFactory, privateKey *rsa.PrivateKey) (*pr
 	if err != nil {
 		return nil, fmt.Errorf("marshal attestation public key: %w", err)
 	}
+
 	return &provider{
 		privateKey:  privateKey,
 		publicKey:   publicKey,

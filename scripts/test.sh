@@ -7,6 +7,7 @@ BASE_DIR="$(dirname "$0")"
 
 cd "$PROJECT_DIR" || exit
 
+bash "${BASE_DIR}/test-go-proxy.sh"
 bash "${BASE_DIR}/test-ci-shell.sh"
 bash "${BASE_DIR}/test-dev-image.sh"
 bash "${BASE_DIR}/test-production-image.sh"

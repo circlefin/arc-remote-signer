@@ -74,6 +74,7 @@ services:
       - "/var/run/docker.sock:/var/run/docker.sock"
       - "./localstack_scripts/create-kms-keys.sh:/etc/localstack/init/ready.d/create-kms-keys.sh" # runs script when localstack is ready
       - "./localstack_scripts/create-secret-manager-key.sh:/etc/localstack/init/ready.d/create-secret-manager-key.sh" # runs script when localstack is ready
+      - "./localstack_scripts/create-watermark-table.sh:/etc/localstack/init/ready.d/create-watermark-table.sh" # runs script when localstack is ready
       - './localstack_scripts/health-check.sh:/opt/health-check.sh' # health check script
     healthcheck:
       test: ['CMD', 'bash', '/opt/health-check.sh']

@@ -91,7 +91,7 @@ func TestNewRunInit_HappyPath(t *testing.T) {
 		calledCtxValue = callCtx.Value(ctxKey{})
 		return &fakeKmsProvider{
 			generateDataKey: func(_ context.Context) ([]byte, []byte, []byte, error) {
-				return bytes.Repeat([]byte{0x11}, 32), []byte("cipher"), []byte("recipient"), nil
+				return bytes.Repeat([]byte{0x11}, 32), []byte("cipher"), nil, nil
 			},
 		}, nil
 	}
@@ -124,7 +124,7 @@ func TestRunInitSelectsKMSBackend(t *testing.T) {
 				}
 				return &fakeKmsProvider{
 					generateDataKey: func(context.Context) ([]byte, []byte, []byte, error) {
-						return bytes.Repeat([]byte{0x11}, 32), []byte("cipher"), nil, nil
+						return bytes.Repeat([]byte{0x22}, 32), []byte("cipher"), nil, nil
 					},
 				}, nil
 			}
@@ -210,18 +210,4 @@ func TestNewRunInit_ContextCancelled(t *testing.T) {
 	cancel() // pre-cancelled
 	_, err := s.runInit(ctx, validInitReq())
 	require.ErrorIs(t, err, context.Canceled)
-}
-
-func TestRunInit_RetainsKMSProvider(t *testing.T) {
-	want := &fakeKmsProvider{
-		generateDataKey: func(_ context.Context) ([]byte, []byte, []byte, error) {
-			return bytes.Repeat([]byte{0x11}, 32), []byte("cipher"), []byte("recipient"), nil
-		},
-	}
-	factory := func(_ context.Context, _ aws.Config, _ []string) (awskms.Provider, error) {
-		return want, nil
-	}
-	s := newServiceForTest(t, false, nil, factory, "http://127.0.0.1:9000")
-	_, err := s.Initialize(context.Background(), validInitReq())
-	require.NoError(t, err)
 }

@@ -24,7 +24,14 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// runInit builds a candidate Ready state without publishing partial state.
+// runInit builds a candidate Ready state. It recovers or generates the key.
+// It then gets the public key from the signing key. In Nitro mode, runInit also
+// makes an attestation document for the public key. The gate sets the Ready
+// state only after all required operations succeed.
+//
+// A LocalStack request uses s.awsproxyEndpoint as the SDK base endpoint.
+// A standard AWS KMS request leaves the base endpoint unchanged and uses
+// end-to-end TLS. See awskms.BuildConfig for the contract.
 func (s *Service) runInit(ctx context.Context, req *pb.InitializeRequest) (*readyState, error) {
 	awsCfg, err := awskms.BuildConfig(req.Credentials, s.awsproxyEndpoint, req.KmsLocalstackEnabled)
 	if err != nil {

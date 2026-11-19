@@ -29,11 +29,13 @@ import (
 	"github.com/circlefin/arc-remote-signer/proto/pb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
-	_loggerLoadOnce sync.Once
-	_logger         *logging.Logger
+	_loggerLoadOnce                  sync.Once
+	_logger                          *logging.Logger
+	errServiceNotInitializedInternal = errors.New(errServiceNotInitialized)
 )
 
 func getLogger() *logging.Logger {
@@ -60,14 +62,16 @@ type Service struct {
 	loadedKey   *keyState
 }
 
-// InitializeKeyFunc installs or recovers the enclave key.
+// InitializeKeyFunc initializes the enclave with an existing key or a request
+// to generate a key. Exactly one argument must specify a key source.
 type InitializeKeyFunc func(
 	context.Context,
 	*pb.SecretEnvelope,
 	pb.Algorithm,
 ) (*pb.InitializeResponse, error)
 
-// keyState contains public response data for the installed enclave key.
+// keyState contains the public response data. Initialization sets this state.
+// The background refresh can replace the attestation data.
 type keyState struct {
 	publicKey           []byte
 	attestationDocument []byte
@@ -75,10 +79,6 @@ type keyState struct {
 }
 
 // New creates a new instance of the Signer gRPC server.
-//
-// The enclave creates an ephemeral KMS client for each initialization attempt.
-// It completes key generation or recovery before it publishes the Ready state.
-// The host persists a generated SecretEnvelope and does not call KMS directly.
 func New(
 	ctx context.Context,
 	keyCfg *Config,
@@ -143,7 +143,11 @@ func generateAndStoreKey(
 	}
 	env := resp.SecretEnvelope
 	if env.Algorithm != algorithm {
-		return nil, fmt.Errorf("generated key algorithm %s does not match configured algorithm %s", env.Algorithm, algorithm)
+		return nil, fmt.Errorf(
+			"generated key algorithm %s does not match configured algorithm %s",
+			env.Algorithm,
+			algorithm,
+		)
 	}
 	if len(env.GetKmsEncryptedDataKey()) == 0 || len(env.GetEncryptedPrivateKey()) == 0 || len(env.GetNonce()) == 0 {
 		return nil, errors.New("enclave Initialize returned incomplete secret envelope")
@@ -177,10 +181,6 @@ func loadKeyFromSecret(
 		return nil, fmt.Errorf("failed to unmarshal header: %w", err)
 	}
 
-	// The stored header records the algorithm the key was generated under. Fail
-	// cleanly on a config/key mismatch instead of silently signing under the
-	// wrong algorithm. Secrets written before this field decode as
-	// ALGORITHM_UNSPECIFIED and fall through to the configured algorithm.
 	if hdr.Algorithm != pb.Algorithm_ALGORITHM_UNSPECIFIED && hdr.Algorithm != algorithm {
 		return nil, fmt.Errorf("stored key algorithm %s does not match configured algorithm %s", hdr.Algorithm, algorithm)
 	}
@@ -196,7 +196,6 @@ func loadKeyFromSecret(
 	if resp.SecretEnvelope != nil {
 		return nil, errors.New("enclave Initialize returned an envelope for an existing key")
 	}
-
 	loadedKey, err := newKeyState(resp)
 	if err != nil {
 		return nil, err
@@ -339,11 +338,56 @@ func (s *Service) PublicKey(_ context.Context, _ *pb.PublicKeyRequest) (*pb.Publ
 	}, nil
 }
 
+// ValidatorPublicKey returns a copy of the initialized validator public key.
+func (s *Service) ValidatorPublicKey() ([]byte, error) {
+	s.loadedKeyMu.RLock()
+	defer s.loadedKeyMu.RUnlock()
+	if s.loadedKey == nil {
+		return nil, errors.New(errServiceNotInitialized)
+	}
+	return bytes.Clone(s.loadedKey.publicKey), nil
+}
+
+// SignEnclave sends the message and metadata to the enclave. It returns enclave
+// errors as received.
+func (s *Service) SignEnclave(
+	ctx context.Context,
+	req *pb.SignMessageRequest,
+) (*pb.SignMessageResponse, error) {
+	resp, err := s.signEnclave(ctx, req)
+	if errors.Is(err, errServiceNotInitializedInternal) {
+		return nil, status.Error(codes.Internal, errServiceNotInitialized)
+	}
+	return resp, err
+}
+
+func (s *Service) signEnclave(
+	ctx context.Context,
+	req *pb.SignMessageRequest,
+) (*pb.SignMessageResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, errInvalidRequest)
+	}
+
+	s.loadedKeyMu.RLock()
+	initialized := s.loadedKey != nil
+	s.loadedKeyMu.RUnlock()
+	if !initialized {
+		return nil, errServiceNotInitializedInternal
+	}
+
+	enclaveRequest := proto.Clone(req).(*pb.SignMessageRequest)
+	resp, err := s.enclavePvd.SignMessage(ctx, enclaveRequest)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
 // Sign validates the request, signs the message through the enclave provider,
 // and returns the generated signature.
 // It returns gRPC status errors for invalid input and uninitialized service state.
 func (s *Service) Sign(ctx context.Context, req *pb.SignRequest) (*pb.SignResponse, error) {
-	// Validate request
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, errInvalidRequest)
 	}
@@ -351,22 +395,14 @@ func (s *Service) Sign(ctx context.Context, req *pb.SignRequest) (*pb.SignRespon
 		return nil, status.Error(codes.InvalidArgument, errEmptyMessage)
 	}
 
-	s.loadedKeyMu.RLock()
-	if s.loadedKey == nil {
-		s.loadedKeyMu.RUnlock()
-		return nil, status.Error(codes.Internal, errServiceNotInitialized)
-	}
-	s.loadedKeyMu.RUnlock()
-
-	// call the enclave to sign the message
-	resp, err := s.enclavePvd.SignMessage(ctx, &pb.SignMessageRequest{
-		Message: req.Message,
-	})
+	resp, err := s.signEnclave(ctx, &pb.SignMessageRequest{Message: req.Message})
 	if err != nil {
+		if errors.Is(err, errServiceNotInitializedInternal) {
+			return nil, status.Error(codes.Internal, errServiceNotInitialized)
+		}
 		getLogger().ErrorErr(ctx, errSignMessage, err, nil)
 		return nil, status.Error(codes.Internal, errSignMessage)
 	}
-	// Convert the response back to protobuf format
 	return &pb.SignResponse{
 		Signature: resp.Signature,
 	}, nil

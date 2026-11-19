@@ -27,17 +27,23 @@ import (
 	"log"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/circlefin/arc-remote-signer/internal/common/grpc/server/interceptor"
+	"github.com/circlefin/arc-remote-signer/internal/common/replica"
+	"github.com/circlefin/arc-remote-signer/proto/pb/signerv2"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	grpcHealth "google.golang.org/grpc/health"
 	grpcHealthV1 "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 )
 
@@ -127,6 +133,76 @@ func waitForStatus(t *testing.T, client grpcHealthV1.HealthClient, service strin
 		time.Sleep(20 * time.Millisecond)
 	}
 	require.Failf(t, "health status timeout", "health status for service %q did not become %s", service, want.String())
+}
+
+func TestMTLSReplicaNameCheckUsesVerifiedCertificate(t *testing.T) {
+	const replicaName = "spiffe://circle/validators/validator-01/replicas/a"
+
+	dir := t.TempDir()
+	serverCAPath, serverCA := writeCertificateAuthority(t, dir, "server-ca")
+	serverCertPath, serverKeyPath := writeSignedKeyPair(
+		t, dir, "server", serverCA,
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		[]string{"localhost"},
+	)
+	clientCAPath, clientCA := writeCertificateAuthority(t, dir, "client-ca")
+	clientCertPath, clientKeyPath := writeSignedKeyPair(
+		t, dir, "client", clientCA,
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, nil, replicaName,
+	)
+
+	tlsOpts, err := WithTLS(&TLSConfig{
+		Enabled: true,
+		Cert:    serverCertPath,
+		Key:     serverKeyPath,
+		ClientAuth: ClientAuthConfig{
+			Enabled: true,
+			CA:      clientCAPath,
+		},
+	})
+	require.NoError(t, err)
+	server := grpc.NewServer(append(tlsOpts, grpc.ChainUnaryInterceptor(
+		interceptor.WithReplicaIdentity(signerv2.SignerService_Sign_FullMethodName, true),
+	))...)
+	signerv2.RegisterSignerServiceServer(server, &replicaNameTestSigner{})
+	listener := bufconn.Listen(1024 * 1024)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = listener.Close()
+	})
+
+	clientCredentials := newClientTLSCredentials(t, serverCAPath, clientCertPath, clientKeyPath)
+	connection, err := grpc.NewClient(
+		"passthrough:///bufnet",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
+		grpc.WithTransportCredentials(clientCredentials),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = connection.Close() })
+
+	client := signerv2.NewSignerServiceClient(connection)
+	for _, name := range []string{replicaName, "validator-01-a"} {
+		response, err := client.Sign(context.Background(), &signerv2.SignRequest{
+			Message:     []byte("message"),
+			Metadata:    &signerv2.SigningMetadata{Kind: signerv2.MessageKind_MESSAGE_KIND_VALIDATOR_PROOF},
+			ReplicaName: name,
+		})
+		require.NoError(t, err)
+		require.Equal(t, name, string(response.Signature))
+	}
+}
+
+type replicaNameTestSigner struct {
+	signerv2.UnimplementedSignerServiceServer
+}
+
+func (*replicaNameTestSigner) Sign(ctx context.Context, _ *signerv2.SignRequest) (*signerv2.SignResponse, error) {
+	id, ok := replica.FromContext(ctx)
+	if !ok {
+		return nil, status.Error(codes.Internal, "replica name missing")
+	}
+	return &signerv2.SignResponse{Signature: []byte(id.String())}, nil
 }
 
 func TestWithTLS(t *testing.T) {
@@ -446,6 +522,7 @@ func writeSignedKeyPair(
 	certificateAuthority testCertificateAuthority,
 	extendedKeyUsage []x509.ExtKeyUsage,
 	dnsNames []string,
+	uriNames ...string,
 ) (string, string) {
 	t.Helper()
 
@@ -460,6 +537,11 @@ func writeSignedKeyPair(
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  extendedKeyUsage,
 		DNSNames:     dnsNames,
+	}
+	for _, rawURI := range uriNames {
+		uri, err := url.Parse(rawURI)
+		require.NoError(t, err)
+		template.URIs = append(template.URIs, uri)
 	}
 	certificateDER, err := x509.CreateCertificate(
 		rand.Reader,

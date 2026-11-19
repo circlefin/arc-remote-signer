@@ -1,13 +1,14 @@
 PROTOC_GO_VERSION=v1.36.6
 PROTOC_GRPC_GO_VERSION=v1.5.1
-BUF_VERSION=v1.50.0
+BUF_VERSION=v1.75.0
+BUF_GO_TOOLCHAIN=go1.26.10
 GO_BIN=$(shell go env GOPATH)/bin
-BUF_BIN=$(shell command -v buf 2>/dev/null || echo "$(GO_BIN)/buf")
+BUF_BIN=$(GO_BIN)/buf
 
 .PHONY: proto lint clean install-deps
 
 install-deps:
-	@command -v buf >/dev/null 2>&1 || go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
+	@GOBIN=$(GO_BIN) GOTOOLCHAIN=$(BUF_GO_TOOLCHAIN) go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
 	@go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GO_VERSION)
 	@go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GRPC_GO_VERSION)
 

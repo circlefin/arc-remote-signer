@@ -4,7 +4,7 @@
 ### WARNING: Changing any of these pins will produce a different enclave image,
 ### invalidating the PCR hashes. Update with care and coordinate with any
 ### downstream attestation policy that references the current PCR values.
-ARG GOLANG_IMAGE=golang:1.25@sha256:dd7d32e19b28621cd982082397fc0510d396805b717d5e77466aa2dd692340de
+ARG GOLANG_IMAGE=golang:1.26.10@sha256:cfa27959837144bf4649802ba38e59daffd0dd2a7994aa83daaf113285b0f551
 ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
 ARG SOURCE_DATE_EPOCH=0
 ARG SNAPSHOT_DATE=20260605T000000Z
@@ -19,14 +19,25 @@ RUN --mount=type=bind,from=certs,target=/usr/local/share/ca-certificates/ \
 ### Docker builds the enclave executable with a reproducible CGO toolchain.
 FROM build-base AS enclave-builder
 
+ARG CLOUDSMITH_USER
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOAUTH=netrc \
+    GOPROXY=${GOPROXY} \
+    GONOPROXY=none \
+    GONOSUMDB=github.com/circlefin/*
+
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=bind,source=docker/go-with-proxy.sh,target=/tmp/go-with-proxy.sh \
+    --mount=type=secret,id=cloudsmith_token,env=CLOUDSMITH_TOKEN \
+    sh /tmp/go-with-proxy.sh go mod download
 COPY . .
 
 # Generate protobuf code (requires network access to the Buf schema
 # registry at buf.build for module dependencies).
-RUN make -C proto proto
+RUN --mount=type=bind,source=docker/go-with-proxy.sh,target=/tmp/go-with-proxy.sh \
+    --mount=type=secret,id=cloudsmith_token,env=CLOUDSMITH_TOKEN \
+    sh /tmp/go-with-proxy.sh make -C proto proto
 
 # Build with BLS portability flag and reproducibility flags.
 RUN CGO_ENABLED=1 CGO_CFLAGS="-O2 -D__BLST_PORTABLE__" \
@@ -41,14 +52,13 @@ ARG SNAPSHOT_DATE
 # Use the builder CA bundle so that APT can use HTTPS.
 # APT then installs the pinned CA bundle in the image.
 RUN --mount=type=bind,from=build-base,source=/etc/ssl/certs/ca-certificates.crt,target=/tmp/ca-certificates.crt \
+    --mount=type=bind,source=docker/install-enclave-runtime-dependencies.sh,target=/tmp/install-enclave-runtime-dependencies.sh \
     mkdir -p /etc/ssl/certs && \
     cp /tmp/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt && \
     : > /etc/apt/sources.list.d/debian.sources && \
     echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${SNAPSHOT_DATE}/ bookworm main" > /etc/apt/sources.list && \
     echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${SNAPSHOT_DATE}/ bookworm-security main" >> /etc/apt/sources.list && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-        iproute2 ca-certificates && \
+    sh /tmp/install-enclave-runtime-dependencies.sh && \
     update-ca-certificates && \
     rm -rf /var/lib/apt/lists/* /var/cache/ldconfig/aux-cache && \
     : > /var/log/dpkg.log && \
